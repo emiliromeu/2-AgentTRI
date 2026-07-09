@@ -2,10 +2,14 @@
 
 Piso 2: recorre la carpeta, salta las que ya tienen JSON (idempotente,
 no gasta creditos de mas), y cada factura falla en su propio try/except
-sin tirar el lote entero abajo.
+sin tirar el lote entero abajo. Acepta PDF y tambien imagenes sueltas
+(jpg/png), enviando cada una con el tipo de bloque que le toca.
+
+Piso 4B: recorre todos los clientes de clientes.csv, no solo Penedes.
 """
 
 import base64
+import csv
 import json
 import os
 
@@ -15,15 +19,35 @@ from dotenv import load_dotenv
 # Bloque a -- cargar la clave desde .env, sin imprimirla jamas (regla 6 de CLAUDE.md)
 load_dotenv()
 api_key = os.environ.get("ANTHROPIC_API_KEY")
+cliente = Anthropic(api_key=api_key)
 
-carpeta_entrada = "clientes/penedes_languages/rebudes/entrada"
-carpeta_salida = "clientes/penedes_languages/rebudes/extraidas"
-os.makedirs(carpeta_salida, exist_ok=True)
+EXTENSIONES_ACEPTADAS = (".pdf", ".jpg", ".jpeg", ".png")
 
-# Bloque b -- listar solo los PDF, en orden estable
-nombres_pdf = sorted(
-    f for f in os.listdir(carpeta_entrada) if f.lower().endswith(".pdf")
-)
+# tipo de bloque y media_type que espera la API segun la extension del archivo
+MEDIA_TYPE_POR_EXTENSION = {
+    ".pdf": ("document", "application/pdf"),
+    ".jpg": ("image", "image/jpeg"),
+    ".jpeg": ("image", "image/jpeg"),
+    ".png": ("image", "image/png"),
+}
+
+
+def leer_clientes():
+    with open("clientes/clientes.csv") as f:
+        return list(csv.DictReader(f))
+
+
+def limpiar_json(texto):
+    """Quita las vallas ```json ... ``` si Claude las añade, pese a
+    que el prompt le pide no hacerlo."""
+    texto = texto.strip()
+    if texto.startswith("```"):
+        lineas = texto.split("\n")[1:]
+        if lineas and lineas[-1].strip() == "```":
+            lineas = lineas[:-1]
+        texto = "\n".join(lineas)
+    return texto.strip()
+
 
 prompt = """Extrae los datos de esta factura y devuelve UNICAMENTE este JSON,
 sin texto antes ni despues, sin bloques de markdown:
@@ -50,64 +74,90 @@ Reglas:
 - exenta = true si la factura indica que esta exenta de IVA.
 - Si un campo no aparece en el PDF, ponlo a null. Nunca inventes un valor.
 - Si la factura no menciona retención, retencion_pct y retencion_cuota son 0. null se reserva para campos que deberían verse y no se pueden leer.
+- Si el documento es un abono o factura rectificativa, conserva bases, cuotas y total en NEGATIVO.
 - observaciones es texto libre para anotar cualquier cosa rara en la factura.
 """
 
-cliente = Anthropic(api_key=api_key)
+# Bloque c -- contadores totales, sumados a lo largo de todos los clientes
+extraidas_total = 0
+saltadas_total = 0
+con_error_total = 0
 
-# Bloque c -- contadores para el resumen final
-extraidas = 0
-saltadas = 0
-con_error = 0
+# Bloque d -- un bucle exterior por cliente, y dentro el bucle de siempre por archivo
+for fila in leer_clientes():
+    carpeta = fila["carpeta"]
+    carpeta_entrada = f"clientes/{carpeta}/rebudes/entrada"
+    carpeta_salida = f"clientes/{carpeta}/rebudes/extraidas"
 
-# Bloque d -- el bucle: cada factura en su propio try/except
-for nombre_pdf in nombres_pdf:
-    ruta_pdf = os.path.join(carpeta_entrada, nombre_pdf)
-    nombre_json = os.path.splitext(nombre_pdf)[0] + ".json"
-    ruta_json = os.path.join(carpeta_salida, nombre_json)
-
-    if os.path.exists(ruta_json):
-        print(f"saltada: {nombre_pdf}")
-        saltadas += 1
+    if not os.path.isdir(carpeta_entrada):
         continue
 
-    try:
-        with open(ruta_pdf, "rb") as f:
-            pdf_base64 = base64.standard_b64encode(f.read()).decode("utf-8")
+    os.makedirs(carpeta_salida, exist_ok=True)
 
-        respuesta = cliente.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": pdf_base64,
+    nombres_archivo = sorted(
+        f for f in os.listdir(carpeta_entrada) if f.lower().endswith(EXTENSIONES_ACEPTADAS)
+    )
+
+    print(f"\n== {carpeta} ==")
+    extraidas = 0
+    saltadas = 0
+    con_error = 0
+
+    for nombre_archivo in nombres_archivo:
+        ruta_archivo = os.path.join(carpeta_entrada, nombre_archivo)
+        nombre_json = os.path.splitext(nombre_archivo)[0] + ".json"
+        ruta_json = os.path.join(carpeta_salida, nombre_json)
+
+        if os.path.exists(ruta_json):
+            print(f"saltada: {nombre_archivo}")
+            saltadas += 1
+            continue
+
+        try:
+            extension = os.path.splitext(nombre_archivo)[1].lower()
+            tipo_bloque, media_type = MEDIA_TYPE_POR_EXTENSION[extension]
+
+            with open(ruta_archivo, "rb") as f:
+                archivo_base64 = base64.standard_b64encode(f.read()).decode("utf-8")
+
+            respuesta = cliente.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": tipo_bloque,
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": archivo_base64,
+                                },
                             },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        )
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            )
 
-        texto = respuesta.content[0].text
-        datos = json.loads(texto)
+            texto = respuesta.content[0].text
+            datos = json.loads(limpiar_json(texto))
 
-        with open(ruta_json, "w") as f:
-            json.dump(datos, f, indent=2, ensure_ascii=False)
+            with open(ruta_json, "w") as f:
+                json.dump(datos, f, indent=2, ensure_ascii=False)
 
-        print(f"extraída: {nombre_pdf}")
-        extraidas += 1
+            print(f"extraída: {nombre_archivo}")
+            extraidas += 1
 
-    except Exception as e:
-        print(f"AVISO: error en {nombre_pdf}: {e}")
-        con_error += 1
+        except Exception as e:
+            print(f"AVISO: error en {nombre_archivo}: {e}")
+            con_error += 1
+
+    print(f"{carpeta}: {extraidas} extraídas, {saltadas} saltadas, {con_error} con error")
+    extraidas_total += extraidas
+    saltadas_total += saltadas
+    con_error_total += con_error
 
 # Bloque e -- resumen final
-print(f"\nResumen: {extraidas} extraídas, {saltadas} saltadas, {con_error} con error")
+print(f"\nResumen total: {extraidas_total} extraídas, {saltadas_total} saltadas, {con_error_total} con error")
