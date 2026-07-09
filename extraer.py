@@ -47,6 +47,7 @@ Reglas:
 - lineas_iva es una lista: si la factura tiene dos tipos de IVA, incluye dos elementos.
 - exenta = true si la factura indica que esta exenta de IVA.
 - Si un campo no aparece en el PDF, ponlo a null. Nunca inventes un valor.
+- Si la factura no menciona retención, retencion_pct y retencion_cuota son 0. null se reserva para campos que deberían verse y no se pueden leer.
 - observaciones es texto libre para anotar cualquier cosa rara en la factura.
 """
 

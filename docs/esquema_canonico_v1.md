@@ -29,6 +29,7 @@ Reglas de extracción:
 - `lineas_iva` es una lista: una factura con dos tipos de IVA produce dos elementos, y el escritor genera **una fila del llibre por elemento**.
 - `exenta = true` cuando la factura lo diga (ej. F260227, formación). Se registra con tipo 0 — el llibre lo recoge en la columna BASE 0.
 - Campo que no aparece en el PDF → `null`. Jamás inventado. `observaciones` es texto libre para que el LLM anote rarezas.
+- Si la factura no menciona retención, `retencion_pct` y `retencion_cuota` son `0` — `null` se reserva para campos que deberían verse y no se pueden leer.
 - No se extrae nada que el llibre no consuma (el vencimiento queda fuera en v1: cada campo extra es superficie de error).
 
 ## 2. Lo que deriva el código — el LLM jamás decide esto
