@@ -15,7 +15,9 @@ docs/esquema_canonico_v1.md — leerlo antes de tocar código.
    nunca bloques grandes sin explicación. Concepto nuevo = explicarlo.
 2. El LLM solo EXTRAE (extraer_factura(pdf) -> JSON). Clasificar,
    validar y escribir es código determinista.
-3. En el Excel de salida van VALORES calculados en Python, jamás fórmulas.
+3. El detalle va siempre en VALORES calculados en Python; los totales
+   pueden ser fórmulas =SUMA() escritas por código sobre rangos que el
+   código controla.
 4. Fallos ruidosos: cada factura en su try/except con estado ERROR;
    el lote nunca muere y nada falla en silencio.
 5. Run idempotente: ejecutarlo dos veces jamás duplica filas; los PDF
