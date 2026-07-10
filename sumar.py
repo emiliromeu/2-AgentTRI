@@ -20,6 +20,10 @@ no cambia ningun estado OK/REVISAR.
 Piso 6B: encontrar_original tambien busca en subcarpetas por proveedor
 (clientes con facturas de compra organizadas asi, ej. davinstal), y el
 origen de las emitidas es personalizable por cliente.
+
+Piso 7: DETALLE GASTOS/INGRESOS por hoja de trimestre -- una fila por
+linea de IVA de cada factura (OK y REVISAR), para auditar de donde
+sale cada suma. No cambia ningun total existente.
 """
 
 import csv
@@ -42,6 +46,7 @@ RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS = {"davinstal": "Emeses/davinstal"}
 SUBCARPETAS_RESERVADAS = {"extraidas", "validadas", "procesadas", "lotes_escaneados", "lotes_procesados"}
 
 FORMATO_MONEDA = '#,##0.00" €"'
+FORMATO_PORCENTAJE = '0"%"'
 
 FUENTE_TITULO = Font(bold=True, size=14)
 FUENTE_SUBTITULO = Font(size=11)
@@ -197,6 +202,56 @@ def escribir_bloque(ws, fila, titulo, sumas, total_ok, con_retencion, retencion_
         fila += 1
 
     return fila + 1  # una fila en blanco antes del siguiente bloque
+
+
+COLUMNAS_DETALLE = ["Fecha", "Nº factura", "Proveedor", "NIF", "Base", "%IVA", "Cuota", "Total", "Estado"]
+
+
+def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_cliente):
+    """Una fila por linea de IVA de cada factura (OK y REVISAR juntas) --
+    para poder auditar de donde sale cada suma de los bloques de arriba.
+    No cambia ningun total: es solo para mirar."""
+    for col in range(1, len(COLUMNAS_DETALLE) + 1):
+        celda = ws.cell(row=fila, column=col)
+        celda.font = ESTILO_ENCABEZADO
+        celda.fill = RELLENO_BLOQUE
+    ws.cell(row=fila, column=1, value=titulo)
+    fila += 1
+
+    for col, texto in enumerate(COLUMNAS_DETALLE, start=1):
+        ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
+    fila += 1
+
+    for nombre, datos in facturas:
+        estado = datos.get("estado")
+        lineas = datos.get("lineas_iva") or [{}]
+        ruta_original = encontrar_original(carpeta_original, nombre)
+
+        for linea in lineas:
+            celda_nombre = ws.cell(row=fila, column=1, value=datos.get("fecha_factura"))
+            celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
+            if ruta_original:
+                celda_num.hyperlink = os.path.relpath(ruta_original, carpeta_cliente)
+                celda_num.font = ESTILO_ENLACE
+            ws.cell(row=fila, column=3, value=datos.get("proveedor"))
+            ws.cell(row=fila, column=4, value=datos.get("nif_proveedor"))
+            celda_base = ws.cell(row=fila, column=5, value=linea.get("base"))
+            celda_base.number_format = FORMATO_MONEDA
+            celda_tipo = ws.cell(row=fila, column=6, value=linea.get("tipo_iva"))
+            celda_tipo.number_format = FORMATO_PORCENTAJE
+            celda_cuota = ws.cell(row=fila, column=7, value=linea.get("cuota"))
+            celda_cuota.number_format = FORMATO_MONEDA
+            celda_total = ws.cell(row=fila, column=8, value=datos.get("total"))
+            celda_total.number_format = FORMATO_MONEDA
+            ws.cell(row=fila, column=9, value=estado)
+
+            if estado == "REVISAR":
+                for col in range(1, len(COLUMNAS_DETALLE) + 1):
+                    ws.cell(row=fila, column=col).fill = RELLENO_AVISO
+
+            fila += 1
+
+    return fila + 1
 
 
 def cargar_manifiestos(carpeta_lotes_procesados):
@@ -411,6 +466,11 @@ for fila_cliente in leer_clientes():
         ws.column_dimensions["B"].width = 14
         ws.column_dimensions["C"].width = 60
         ws.column_dimensions["D"].width = 16
+        ws.column_dimensions["E"].width = 14
+        ws.column_dimensions["F"].width = 10
+        ws.column_dimensions["G"].width = 14
+        ws.column_dimensions["H"].width = 14
+        ws.column_dimensions["I"].width = 12
 
         fila = escribir_titulo(ws, fila_cliente["nombre"], fila_cliente["nif"])
         pendientes = []
@@ -441,7 +501,17 @@ for fila_cliente in leer_clientes():
             pendientes.append((nombre, datos, "INGRESO", f"{carpeta_cliente}/{origen_ingressos}"))
 
         if pendientes:
-            escribir_pendientes(ws, fila, pendientes, carpeta_cliente)
+            fila = escribir_pendientes(ws, fila, pendientes, carpeta_cliente)
+
+        if trimestre != "SIN FECHA":
+            fila = escribir_detalle(
+                ws, fila, "DETALLE GASTOS", datos_trimestre["gastos"],
+                f"{carpeta_cliente}/rebudes", carpeta_cliente,
+            )
+            fila = escribir_detalle(
+                ws, fila, "DETALLE INGRESOS", datos_trimestre["ingresos"],
+                f"{carpeta_cliente}/{origen_ingressos}", carpeta_cliente,
+            )
 
     ws_avisos = wb.create_sheet("AVISOS")
     ws_avisos.column_dimensions["A"].width = 55
