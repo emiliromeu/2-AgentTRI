@@ -24,6 +24,12 @@ origen de las emitidas es personalizable por cliente.
 Piso 7: DETALLE GASTOS/INGRESOS por hoja de trimestre -- una fila por
 linea de IVA de cada factura (OK y REVISAR), para auditar de donde
 sale cada suma. No cambia ningun total existente.
+
+Piso 8: todo el texto visible pasa a catala (los motivos de validar.py
+se traducen aqui, en la presentacion -- validar.py no se toca). Nueva
+fila RESULTAT IVA (calculo derivado de las Sigma cuota ya existentes).
+Relleno verde suave para las filas OK (antes solo REVISAR llevaba
+relleno). Ningun total cambia: solo presentacion y calculo derivado.
 """
 
 import csv
@@ -50,15 +56,43 @@ FORMATO_PORCENTAJE = '0"%"'
 
 FUENTE_TITULO = Font(bold=True, size=14)
 FUENTE_SUBTITULO = Font(size=11)
+FUENTE_NOTA = Font(italic=True, size=9)
 ESTILO_ENCABEZADO = Font(bold=True)
 ESTILO_ENLACE = Font(color="0563C1", underline="single")
 
 RELLENO_BLOQUE = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
 RELLENO_AVISO = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+RELLENO_OK = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
 BORDE_SUPERIOR = Border(top=Side(style="thin"))
 AJUSTE_TEXTO = Alignment(wrap_text=True, vertical="top")
 
 GENERADO_EL = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+# Traduccion de los motivos de validar.py -- son textos fijos con datos
+# incrustados (numeros, nombres de archivo), asi que se traduce por
+# sustitucion de las palabras fijas, dejando el resto intacto. validar.py
+# y los campos JSON no se tocan (regla de hierro del piso 8).
+TRADUCCIONES_MOTIVO = [
+    ("campo obligatorio vacío:", "camp obligatori buit:"),
+    ("línea", "línia"),
+    ("de IVA con campo vacío", "d'IVA amb camp buit"),
+    ("pero cuota indica", "però la quota indica"),
+    ("total no cuadra: bases+cuotas=", "el total no quadra: bases+quotes="),
+    (", total indica ", ", el total indica "),
+    ("nif_receptor no coincide: esperado", "el nif_receptor no coincideix: s'esperava"),
+    (", encontrado ", ", s'ha trobat "),
+    ("factura duplicada: mismo proveedor+num_factura que", "factura duplicada: mateix proveïdor+núm_factura que"),
+    ("retención con cuota > 0: el llibre no tiene columna para representarla",
+     "retenció amb quota > 0: el llibre no té columna per representar-la"),
+    ("el cliente no aparece ni como emisor ni como receptor",
+     "el client no apareix ni com a emissor ni com a receptor"),
+]
+
+
+def traducir_motivo(motivo):
+    for es, ca in TRADUCCIONES_MOTIVO:
+        motivo = motivo.replace(es, ca)
+    return motivo
 
 
 def leer_clientes():
@@ -115,7 +149,7 @@ def encontrar_original(carpeta_origen, nombre_json):
 
 
 def escribir_titulo(ws, nombre_cliente, nif_cliente):
-    ws.cell(row=1, column=1, value=f"SUMATORIOS {nombre_cliente}").font = FUENTE_TITULO
+    ws.cell(row=1, column=1, value=f"SUMATORIS {nombre_cliente}").font = FUENTE_TITULO
     ws.cell(row=2, column=1, value=f"NIF {nif_cliente}").font = FUENTE_SUBTITULO
     ws.cell(row=3, column=1, value="Ejercici 2026").font = FUENTE_SUBTITULO
     ws.cell(row=4, column=1, value=f"Generat el {GENERADO_EL}").font = FUENTE_SUBTITULO
@@ -155,7 +189,7 @@ def escribir_bloque(ws, fila, titulo, sumas, total_ok, con_retencion, retencion_
     ws.cell(row=fila, column=1, value=titulo)
     fila += 1
 
-    for col, texto in enumerate(["Tipo IVA", "Base", "Cuota", "Total"], start=1):
+    for col, texto in enumerate(["Tipus IVA", "Base", "Quota", "Total"], start=1):
         ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
     fila += 1
 
@@ -168,7 +202,7 @@ def escribir_bloque(ws, fila, titulo, sumas, total_ok, con_retencion, retencion_
     for tipo in tipos_a_escribir:
         base = sumas[tipo]["base"]
         cuota = sumas[tipo]["cuota"]
-        etiqueta_tipo = "OTROS" if tipo == "otros" else tipo
+        etiqueta_tipo = "ALTRES" if tipo == "otros" else tipo
         ws.cell(row=fila, column=1, value=etiqueta_tipo)
         celda_base = ws.cell(row=fila, column=2, value=round(base, 2))
         celda_base.number_format = FORMATO_MONEDA
@@ -195,7 +229,7 @@ def escribir_bloque(ws, fila, titulo, sumas, total_ok, con_retencion, retencion_
     if con_retencion:
         for col in range(1, 5):
             ws.cell(row=fila, column=col).border = BORDE_SUPERIOR
-        ws.cell(row=fila, column=1, value="Σ RETENCIONES").font = ESTILO_ENCABEZADO
+        ws.cell(row=fila, column=1, value="Σ RETENCIONS").font = ESTILO_ENCABEZADO
         celda = ws.cell(row=fila, column=4, value=round(retencion_ok, 2))
         celda.font = ESTILO_ENCABEZADO
         celda.number_format = FORMATO_MONEDA
@@ -204,7 +238,34 @@ def escribir_bloque(ws, fila, titulo, sumas, total_ok, con_retencion, retencion_
     return fila + 1  # una fila en blanco antes del siguiente bloque
 
 
-COLUMNAS_DETALLE = ["Fecha", "Nº factura", "Proveedor", "NIF", "Base", "%IVA", "Cuota", "Total", "Estado"]
+def escribir_resultat(ws, fila, cuota_ingressos, cuota_gastos):
+    """RESULTAT IVA = Sigma cuota ingressos OK - Sigma cuota gastos OK --
+    calculo derivado de las mismas sumas que ya alimentan TOTAL, no
+    recalcula nada nuevo desde las facturas. No es una liquidacion
+    oficial, solo un resultat de treball."""
+    resultat = cuota_ingressos - cuota_gastos
+
+    for col in range(1, 5):
+        ws.cell(row=fila, column=col).border = BORDE_SUPERIOR
+    ws.cell(row=fila, column=1, value="RESULTAT IVA (repercutit − suportat)").font = ESTILO_ENCABEZADO
+    celda = ws.cell(row=fila, column=4, value=round(resultat, 2))
+    celda.font = ESTILO_ENCABEZADO
+    celda.number_format = FORMATO_MONEDA
+    fila += 1
+
+    if resultat > 0:
+        etiqueta = " (a ingressar)"
+    elif resultat < 0:
+        etiqueta = " (a compensar)"
+    else:
+        etiqueta = ""
+    ws.cell(row=fila, column=1, value=f"resultat de treball, no liquidació oficial{etiqueta}").font = FUENTE_NOTA
+    fila += 1
+
+    return fila + 1
+
+
+COLUMNAS_DETALLE = ["Data", "Núm. factura", "Proveïdor", "NIF", "Base", "%IVA", "Quota", "Total", "Estat"]
 
 
 def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_cliente):
@@ -245,9 +306,9 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
             celda_total.number_format = FORMATO_MONEDA
             ws.cell(row=fila, column=9, value=estado)
 
-            if estado == "REVISAR":
-                for col in range(1, len(COLUMNAS_DETALLE) + 1):
-                    ws.cell(row=fila, column=col).fill = RELLENO_AVISO
+            relleno = RELLENO_AVISO if estado == "REVISAR" else RELLENO_OK
+            for col in range(1, len(COLUMNAS_DETALLE) + 1):
+                ws.cell(row=fila, column=col).fill = relleno
 
             fila += 1
 
@@ -301,14 +362,14 @@ def avisos_consistencia(facturas):
 
 
 def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos):
-    # a) DOCUMENTOS APARTADOS -- albaranes que trocear.py aparta y nadie mas procesa
+    # a) DOCUMENTS APARTATS -- albarans que trocear.py aparta i ningu mes processa
     for col in range(1, 3):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
         celda.fill = RELLENO_BLOQUE
-    ws.cell(row=fila, column=1, value="DOCUMENTOS APARTADOS")
+    ws.cell(row=fila, column=1, value="DOCUMENTS APARTATS")
     fila += 1
-    for col, texto in enumerate(["Archivo", "Justificación"], start=1):
+    for col, texto in enumerate(["Fitxer", "Justificació"], start=1):
         ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
     fila += 1
 
@@ -320,7 +381,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos):
         )
 
     if not nombres_albaran:
-        ws.cell(row=fila, column=1, value="sin documentos apartados")
+        ws.cell(row=fila, column=1, value="sense documents apartats")
         fila += 1
     else:
         for nombre in nombres_albaran:
@@ -331,20 +392,20 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos):
             celda_justificacion = ws.cell(
                 row=fila,
                 column=2,
-                value="Albarà: no se contabiliza — la factura posterior agrupa sus albarans. Verificar que esa factura llegó",
+                value="Albarà: no es comptabilitza — la factura posterior n'agrupa els albarans. Verificar que aquesta factura ha arribat",
             )
             celda_justificacion.alignment = AJUSTE_TEXTO
             fila += 1
     fila += 1
 
-    # b) PAGINAS DESCARTADAS COMO RUIDO -- leidas de los manifiestos de trocear.py
+    # b) PAGINES DESCARTADES COM A SOROLL -- llegides dels manifests de trocear.py
     for col in range(1, 4):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
         celda.fill = RELLENO_BLOQUE
-    ws.cell(row=fila, column=1, value="PÁGINAS DESCARTADAS COMO RUIDO")
+    ws.cell(row=fila, column=1, value="PÀGINES DESCARTADES COM A SOROLL")
     fila += 1
-    for col, texto in enumerate(["Lote", "Páginas", "Pista"], start=1):
+    for col, texto in enumerate(["Lot", "Pàgines", "Pista"], start=1):
         ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
     fila += 1
 
@@ -357,10 +418,10 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos):
     ]
 
     if not manifiestos:
-        ws.cell(row=fila, column=1, value="sin datos de lotes anteriores")
+        ws.cell(row=fila, column=1, value="sense dades de lots anteriors")
         fila += 1
     elif not filas_ruido:
-        ws.cell(row=fila, column=1, value="sin páginas de ruido")
+        ws.cell(row=fila, column=1, value="sense pàgines de soroll")
         fila += 1
     else:
         for nombre_lote, doc in filas_ruido:
@@ -374,23 +435,23 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos):
             fila += 1
     fila += 1
 
-    # c) AVISOS DE CONSISTENCIA -- mismo proveedor, mas de un tipo de IVA
+    # c) AVISOS DE CONSISTENCIA -- mateix proveidor, mes d'un tipus d'IVA
     for col in range(1, 6):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
         celda.fill = RELLENO_BLOQUE
-    ws.cell(row=fila, column=1, value="AVISOS DE CONSISTENCIA")
+    ws.cell(row=fila, column=1, value="AVISOS DE CONSISTÈNCIA")
     fila += 1
-    for col, texto in enumerate(["Flujo", "Proveedor", "NIF", "Tipos de IVA", "Archivos afectados"], start=1):
+    for col, texto in enumerate(["Flux", "Proveïdor", "NIF", "Tipus d'IVA", "Fitxers afectats"], start=1):
         ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
     fila += 1
 
-    filas_consistencia = [("GASTO", a) for a in avisos_consistencia(gastos)] + [
-        ("INGRESO", a) for a in avisos_consistencia(ingresos)
+    filas_consistencia = [("DESPESA", a) for a in avisos_consistencia(gastos)] + [
+        ("INGRÉS", a) for a in avisos_consistencia(ingresos)
     ]
 
     if not filas_consistencia:
-        ws.cell(row=fila, column=1, value="sin avisos de consistencia")
+        ws.cell(row=fila, column=1, value="sense avisos de consistència")
         fila += 1
     else:
         for flujo, (proveedor, nifs, tipos, archivos) in filas_consistencia:
@@ -410,9 +471,9 @@ def escribir_pendientes(ws, fila, pendientes, carpeta_cliente):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
         celda.fill = RELLENO_AVISO
-    ws.cell(row=fila, column=1, value="PENDIENTE DE REVISIÓN")
+    ws.cell(row=fila, column=1, value="PENDENT DE REVISIÓ")
     fila += 1
-    for col, texto in enumerate(["Archivo", "Tipo", "Motivos"], start=1):
+    for col, texto in enumerate(["Fitxer", "Tipus", "Motius"], start=1):
         ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
     fila += 1
 
@@ -426,7 +487,8 @@ def escribir_pendientes(ws, fila, pendientes, carpeta_cliente):
         else:
             print(f"AVISO: no se encontró el original de {nombre}")
         ws.cell(row=fila, column=2, value=tipo_bloque)
-        celda_motivos = ws.cell(row=fila, column=3, value="; ".join(datos.get("motivos") or []))
+        motivos_traducidos = [traducir_motivo(m) for m in (datos.get("motivos") or [])]
+        celda_motivos = ws.cell(row=fila, column=3, value="; ".join(motivos_traducidos))
         celda_motivos.alignment = AJUSTE_TEXTO
         fila += 1
 
@@ -461,7 +523,8 @@ for fila_cliente in leer_clientes():
 
     for trimestre in orden:
         datos_trimestre = trimestres[trimestre]
-        ws = wb.create_sheet(trimestre)
+        nombre_hoja = "SENSE DATA" if trimestre == "SIN FECHA" else trimestre
+        ws = wb.create_sheet(nombre_hoja)
         ws.column_dimensions["A"].width = 50
         ws.column_dimensions["B"].width = 14
         ws.column_dimensions["C"].width = 60
@@ -477,10 +540,14 @@ for fila_cliente in leer_clientes():
 
         if trimestre != "SIN FECHA":
             sumas_g, total_g, _, revisar_g = sumar_bloque(datos_trimestre["gastos"])
-            fila = escribir_bloque(ws, fila, "GASTOS", sumas_g, total_g, con_retencion=False, retencion_ok=0)
+            fila = escribir_bloque(ws, fila, "DESPESES", sumas_g, total_g, con_retencion=False, retencion_ok=0)
 
             sumas_i, total_i, retencion_i, revisar_i = sumar_bloque(datos_trimestre["ingresos"])
-            fila = escribir_bloque(ws, fila, "INGRESOS", sumas_i, total_i, con_retencion=True, retencion_ok=retencion_i)
+            fila = escribir_bloque(ws, fila, "INGRESSOS", sumas_i, total_i, con_retencion=True, retencion_ok=retencion_i)
+
+            cuota_g = sum(v["cuota"] for v in sumas_g.values())
+            cuota_i = sum(v["cuota"] for v in sumas_i.values())
+            fila = escribir_resultat(ws, fila, cuota_i, cuota_g)
 
             n_ok_g = len(datos_trimestre["gastos"]) - len(revisar_g)
             n_ok_i = len(datos_trimestre["ingresos"]) - len(revisar_i)
@@ -496,20 +563,20 @@ for fila_cliente in leer_clientes():
 
         origen_ingressos = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
         for nombre, datos in revisar_g:
-            pendientes.append((nombre, datos, "GASTO", f"{carpeta_cliente}/rebudes"))
+            pendientes.append((nombre, datos, "DESPESA", f"{carpeta_cliente}/rebudes"))
         for nombre, datos in revisar_i:
-            pendientes.append((nombre, datos, "INGRESO", f"{carpeta_cliente}/{origen_ingressos}"))
+            pendientes.append((nombre, datos, "INGRÉS", f"{carpeta_cliente}/{origen_ingressos}"))
 
         if pendientes:
             fila = escribir_pendientes(ws, fila, pendientes, carpeta_cliente)
 
         if trimestre != "SIN FECHA":
             fila = escribir_detalle(
-                ws, fila, "DETALLE GASTOS", datos_trimestre["gastos"],
+                ws, fila, "DETALL DESPESES", datos_trimestre["gastos"],
                 f"{carpeta_cliente}/rebudes", carpeta_cliente,
             )
             fila = escribir_detalle(
-                ws, fila, "DETALLE INGRESOS", datos_trimestre["ingresos"],
+                ws, fila, "DETALL INGRESSOS", datos_trimestre["ingresos"],
                 f"{carpeta_cliente}/{origen_ingressos}", carpeta_cliente,
             )
 
