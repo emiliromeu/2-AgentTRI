@@ -10,6 +10,11 @@ Piso 4B: recorre todos los clientes de clientes.csv, no solo Penedes.
 Piso 5: procesa tambien el flujo ingressos (liquidaciones de cooperativa
 en apartados/ingressos/) ademas del flujo rebudes (entrada/), con
 resumenes separados por flujo.
+
+Piso 6B: el origen de cada flujo puede personalizarse por cliente
+(RUTAS_ORIGEN_PERSONALIZADAS), para clientes con carpetas ya
+organizadas antes de este pipeline. El flujo rebudes tambien lee
+subcarpetas por proveedor, no solo entrada/ (listar_archivos_rebudes).
 """
 
 import base64
@@ -39,6 +44,27 @@ MEDIA_TYPE_POR_EXTENSION = {
 def leer_clientes():
     with open("clientes/clientes.csv") as f:
         return list(csv.DictReader(f))
+
+
+SUBCARPETAS_RESERVADAS = {"extraidas", "validadas", "procesadas", "lotes_escaneados", "lotes_procesados"}
+
+
+def listar_archivos_rebudes(carpeta_rebudes):
+    """Recoge PDF/imagenes de entrada/ y de cualquier subcarpeta hermana
+    que no sea una reservada del pipeline -- algunos clientes (davinstal)
+    organizan sus facturas de compra por proveedor (Rebudes/biosca/,
+    Rebudes/SALTOKI/...) en vez de dejarlas sueltas en entrada/."""
+    rutas = []
+    if not os.path.isdir(carpeta_rebudes):
+        return rutas
+    for nombre in sorted(os.listdir(carpeta_rebudes)):
+        ruta = os.path.join(carpeta_rebudes, nombre)
+        if not os.path.isdir(ruta) or nombre.lower() in SUBCARPETAS_RESERVADAS:
+            continue
+        for nombre_archivo in sorted(os.listdir(ruta)):
+            if nombre_archivo.lower().endswith(EXTENSIONES_ACEPTADAS):
+                rutas.append(os.path.join(ruta, nombre_archivo))
+    return rutas
 
 
 def limpiar_json(texto):
@@ -92,11 +118,20 @@ Reglas:
 """
 
 # (etiqueta, carpeta origen, carpeta destino) -- mismo esquema y mismas reglas
-# para rebudes (facturas de compra) e ingressos (liquidaciones de cooperativa)
+# para rebudes (facturas de compra) e ingressos (liquidaciones de cooperativa).
+# El origen de "rebudes" es la carpeta rebudes/ entera (no solo entrada/),
+# para poder mirar tambien sus subcarpetas por proveedor si las tiene.
 FLUJOS = [
-    ("rebudes", "rebudes/entrada", "rebudes/extraidas"),
+    ("rebudes", "rebudes", "rebudes/extraidas"),
     ("ingressos", "apartados/ingressos", "apartados/ingressos_extraidas"),
 ]
+
+# Algunos clientes ya tenian su carpeta de facturas organizada antes de
+# este pipeline -- no se ha movido nada, el codigo apunta ahi en vez de
+# al origen por defecto de FLUJOS.
+RUTAS_ORIGEN_PERSONALIZADAS = {
+    ("davinstal", "ingressos"): "Emeses/davinstal",
+}
 
 # Bloque c -- contadores totales por flujo, sumados a lo largo de todos los clientes
 extraidas_total = {"rebudes": 0, "ingressos": 0}
@@ -108,7 +143,8 @@ for fila in leer_clientes():
     carpeta = fila["carpeta"]
 
     for etiqueta, origen_rel, destino_rel in FLUJOS:
-        carpeta_entrada = f"clientes/{carpeta}/{origen_rel}"
+        origen = RUTAS_ORIGEN_PERSONALIZADAS.get((carpeta, etiqueta), origen_rel)
+        carpeta_entrada = f"clientes/{carpeta}/{origen}"
         carpeta_salida = f"clientes/{carpeta}/{destino_rel}"
 
         if not os.path.isdir(carpeta_entrada):
@@ -116,17 +152,22 @@ for fila in leer_clientes():
 
         os.makedirs(carpeta_salida, exist_ok=True)
 
-        nombres_archivo = sorted(
-            f for f in os.listdir(carpeta_entrada) if f.lower().endswith(EXTENSIONES_ACEPTADAS)
-        )
+        if etiqueta == "rebudes":
+            rutas_archivo = listar_archivos_rebudes(carpeta_entrada)
+        else:
+            rutas_archivo = [
+                os.path.join(carpeta_entrada, f)
+                for f in sorted(os.listdir(carpeta_entrada))
+                if f.lower().endswith(EXTENSIONES_ACEPTADAS)
+            ]
 
         print(f"\n== {carpeta} / {etiqueta} ==")
         extraidas = 0
         saltadas = 0
         con_error = 0
 
-        for nombre_archivo in nombres_archivo:
-            ruta_archivo = os.path.join(carpeta_entrada, nombre_archivo)
+        for ruta_archivo in rutas_archivo:
+            nombre_archivo = os.path.basename(ruta_archivo)
             nombre_json = os.path.splitext(nombre_archivo)[0] + ".json"
             ruta_json = os.path.join(carpeta_salida, nombre_json)
 

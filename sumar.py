@@ -16,6 +16,10 @@ nada muere en silencio tampoco en el enrutado): albaranes apartados,
 paginas de ruido leidas de los manifiestos de trocear.py, y avisos de
 consistencia (mismo proveedor, mas de un tipo de IVA). Solo informa,
 no cambia ningun estado OK/REVISAR.
+
+Piso 6B: encontrar_original tambien busca en subcarpetas por proveedor
+(clientes con facturas de compra organizadas asi, ej. davinstal), y el
+origen de las emitidas es personalizable por cliente.
 """
 
 import csv
@@ -28,6 +32,14 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 TIPOS_IVA = [0, 4, 5, 10, 12, 21]
 EXTENSIONES_ORIGINAL = (".pdf", ".jpg", ".jpeg", ".png")
+
+# Mismo criterio que en extraer_todas.py: algunos clientes ya tenian su
+# carpeta de facturas emitidas organizada antes de este pipeline, asi
+# que el enlace del original tiene que apuntar ahi en vez de al
+# apartados/ingressos/ por defecto.
+RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS = {"davinstal": "Emeses/davinstal"}
+
+SUBCARPETAS_RESERVADAS = {"extraidas", "validadas", "procesadas", "lotes_escaneados", "lotes_procesados"}
 
 FORMATO_MONEDA = '#,##0.00" €"'
 
@@ -75,11 +87,25 @@ def trimestre_de(fecha):
 
 
 def encontrar_original(carpeta_origen, nombre_json):
+    """Busca el original directamente en carpeta_origen, y si no esta
+    ahi, en cualquier subcarpeta hermana no reservada del pipeline --
+    algunos clientes (davinstal) organizan sus facturas de compra por
+    proveedor (rebudes/biosca/, rebudes/SALTOKI/...) en vez de dejarlas
+    sueltas en rebudes/entrada/."""
     base = os.path.splitext(nombre_json)[0]
     for ext in EXTENSIONES_ORIGINAL:
         ruta = os.path.join(carpeta_origen, base + ext)
         if os.path.exists(ruta):
             return ruta
+    if os.path.isdir(carpeta_origen):
+        for nombre_sub in sorted(os.listdir(carpeta_origen)):
+            ruta_sub = os.path.join(carpeta_origen, nombre_sub)
+            if not os.path.isdir(ruta_sub) or nombre_sub.lower() in SUBCARPETAS_RESERVADAS:
+                continue
+            for ext in EXTENSIONES_ORIGINAL:
+                ruta = os.path.join(ruta_sub, base + ext)
+                if os.path.exists(ruta):
+                    return ruta
     return None
 
 
@@ -408,10 +434,11 @@ for fila_cliente in leer_clientes():
             _, _, _, revisar_i = sumar_bloque(datos_trimestre["ingresos"])
             print(f"{carpeta} / SIN FECHA: {len(revisar_g) + len(revisar_i)} a revisar (sin fecha_factura)")
 
+        origen_ingressos = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
         for nombre, datos in revisar_g:
-            pendientes.append((nombre, datos, "GASTO", f"{carpeta_cliente}/rebudes/entrada"))
+            pendientes.append((nombre, datos, "GASTO", f"{carpeta_cliente}/rebudes"))
         for nombre, datos in revisar_i:
-            pendientes.append((nombre, datos, "INGRESO", f"{carpeta_cliente}/apartados/ingressos"))
+            pendientes.append((nombre, datos, "INGRESO", f"{carpeta_cliente}/{origen_ingressos}"))
 
         if pendientes:
             escribir_pendientes(ws, fila, pendientes, carpeta_cliente)

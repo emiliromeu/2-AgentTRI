@@ -10,6 +10,10 @@ esperado ya no esta fijo, sale de la fila de cada cliente.
 Piso 5: normaliza NIF antes de comparar, ignora duplicados (None, None),
 y procesa tambien el flujo ingressos (liquidaciones de cooperativa)
 ademas del flujo rebudes (facturas de compra).
+
+Piso 6B: en ingressos el cliente puede ser receptor (liquidacion) o
+emisor (factura emitida por el propio cliente) -- el giro. En rebudes
+el cliente sigue siendo siempre el receptor, sin excepcion.
 """
 
 import csv
@@ -123,11 +127,23 @@ for fila in leer_clientes():
                 if abs(suma - total) > TOLERANCIA:
                     motivos.append(f"total no cuadra: bases+cuotas={suma:.2f}, total indica {total}")
 
-            nif_receptor = datos.get("nif_receptor")
-            if nif_receptor is not None and normalizar_nif(nif_receptor) != normalizar_nif(nif_receptor_esperado):
-                motivos.append(
-                    f"nif_receptor no coincide: esperado {nif_receptor_esperado}, encontrado {nif_receptor}"
-                )
+            # En rebudes el cliente SIEMPRE es el receptor (factura de compra).
+            # En ingressos puede ser receptor (liquidacion de cooperativa) o
+            # emisor (factura emitida por el propio cliente) -- el giro.
+            cliente_normalizado = normalizar_nif(nif_receptor_esperado)
+            if etiqueta == "rebudes":
+                nif_receptor = datos.get("nif_receptor")
+                if nif_receptor is not None and normalizar_nif(nif_receptor) != cliente_normalizado:
+                    motivos.append(
+                        f"nif_receptor no coincide: esperado {nif_receptor_esperado}, encontrado {nif_receptor}"
+                    )
+            elif etiqueta == "ingressos":
+                nif_proveedor_doc = datos.get("nif_proveedor")
+                nif_receptor = datos.get("nif_receptor")
+                es_receptor = nif_receptor is not None and normalizar_nif(nif_receptor) == cliente_normalizado
+                es_emisor = nif_proveedor_doc is not None and normalizar_nif(nif_proveedor_doc) == cliente_normalizado
+                if not es_receptor and not es_emisor:
+                    motivos.append("el cliente no aparece ni como emisor ni como receptor")
 
             clave = (datos.get("nif_proveedor"), datos.get("num_factura"))
             otros = [n for n in claves[clave] if n != nombre] if clave != (None, None) else []
