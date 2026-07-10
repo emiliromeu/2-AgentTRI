@@ -43,13 +43,21 @@ def leer_clientes():
 
 def limpiar_json(texto):
     """Quita las vallas ```json ... ``` si Claude las añade, pese a
-    que el prompt le pide no hacerlo."""
+    que el prompt le pide no hacerlo. Si encima hay prosa antes del
+    JSON (Claude "pensando en voz alta" con un documento incompleto),
+    recorta desde la primera { hasta la última }."""
     texto = texto.strip()
     if texto.startswith("```"):
         lineas = texto.split("\n")[1:]
         if lineas and lineas[-1].strip() == "```":
             lineas = lineas[:-1]
         texto = "\n".join(lineas)
+    texto = texto.strip()
+    if not texto.startswith("{") and not texto.startswith("["):
+        inicio = texto.find("{")
+        fin = texto.rfind("}")
+        if inicio != -1 and fin != -1 and fin > inicio:
+            texto = texto[inicio:fin + 1]
     return texto.strip()
 
 
@@ -78,6 +86,7 @@ Reglas:
 - exenta = true si la factura indica que esta exenta de IVA.
 - Si un campo no aparece en el PDF, ponlo a null. Nunca inventes un valor.
 - Si la factura no menciona retención, retencion_pct y retencion_cuota son 0. null se reserva para campos que deberían verse y no se pueden leer.
+- El campo total es SIEMPRE el total de la factura: suma de bases más cuotas de IVA. NUNCA el líquido a percibir tras retenciones (llamado total acompte, líquido, o a percibir). La retención va exclusivamente en retencion_pct y retencion_cuota — jamás como línea de IVA, jamás descontada del total ni de las bases.
 - Si el documento es un abono o factura rectificativa, conserva bases, cuotas y total en NEGATIVO.
 - observaciones es texto libre para anotar cualquier cosa rara en la factura.
 """

@@ -117,15 +117,9 @@ for fila in leer_clientes():
                         f"línea {i}: {base} × {tipo}% = {esperado:.2f}, pero cuota indica {cuota}"
                     )
 
-            # En ingressos el campo "total" es el importe neto (ya descontada
-            # la retención) -- una liquidación real de cooperativa dice
-            # "total factura 523,43 menos retención 10,07 = total 513,36".
-            # En rebudes no se resta nada (ahí la retención es harina de otro costal).
             total = datos.get("total")
             if total is not None:
                 suma = sum((l.get("base") or 0) + (l.get("cuota") or 0) for l in lineas)
-                if etiqueta == "ingressos":
-                    suma -= datos.get("retencion_cuota") or 0
                 if abs(suma - total) > TOLERANCIA:
                     motivos.append(f"total no cuadra: bases+cuotas={suma:.2f}, total indica {total}")
 

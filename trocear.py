@@ -41,13 +41,21 @@ def leer_clientes():
 
 def limpiar_json(texto):
     """Quita las vallas ```json ... ``` si Claude las añade, pese a
-    que el prompt le pide no hacerlo."""
+    que el prompt le pide no hacerlo. Si encima hay prosa antes del
+    JSON (Claude "pensando en voz alta" con un documento incompleto),
+    recorta desde la primera { hasta la última }."""
     texto = texto.strip()
     if texto.startswith("```"):
         lineas = texto.split("\n")[1:]
         if lineas and lineas[-1].strip() == "```":
             lineas = lineas[:-1]
         texto = "\n".join(lineas)
+    texto = texto.strip()
+    if not texto.startswith("{") and not texto.startswith("["):
+        inicio = texto.find("{")
+        fin = texto.rfind("}")
+        if inicio != -1 and fin != -1 and fin > inicio:
+            texto = texto[inicio:fin + 1]
     return texto.strip()
 
 
