@@ -42,6 +42,13 @@ Piso 9.2: decisions.csv (archivo,accion,nota,qui,data) -- 'aprovar'
 hace que una REVISAR cuente como OK; 'descartar' la saca de toda suma
 y la manda a un bloque DESCARTATS propio. Sin decisions.csv, o vacio,
 el comportamiento es identico al de antes de este piso.
+
+Piso 9.3: encontrar_original tambien busca en "procesadas" (antes
+excluida). verificar_enlaces_excel() reabre el Excel ya escrito y
+distingue "trencat" (bug de codigo, no deberia pasar nunca) de
+"corrupte" (archivo presente pero vacio o truncado -- problema de
+datos/sincronizacion, ningun cambio de codigo lo arregla). El motivo
+de un ERROR distingue este caso del generico cuando se detecta.
 """
 
 import csv
@@ -49,7 +56,7 @@ import json
 import os
 from datetime import datetime
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 TIPOS_IVA = [0, 4, 5, 10, 12, 21]
@@ -62,6 +69,10 @@ EXTENSIONES_ORIGINAL = (".pdf", ".jpg", ".jpeg", ".png")
 RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS = {"davinstal": "Emeses/davinstal"}
 
 SUBCARPETAS_RESERVADAS = {"extraidas", "validadas", "procesadas", "lotes_escaneados", "lotes_procesados"}
+# Piso 9.3: para buscar un ORIGINAL (no para detectar errores), "procesadas"
+# no se excluye -- ahi es donde un PDF ya tratado puede haberse movido
+# (regla 5, run idempotente), y sigue siendo su ubicacion legitima.
+SUBCARPETAS_NO_ORIGINALES = {"extraidas", "validadas", "lotes_escaneados", "lotes_procesados"}
 
 FORMATO_MONEDA = '#,##0.00" €"'
 FORMATO_PORCENTAJE = '0"%"'
@@ -213,7 +224,9 @@ def encontrar_original(carpeta_origen, nombre_json):
     ahi, en cualquier subcarpeta hermana no reservada del pipeline --
     algunos clientes (davinstal) organizan sus facturas de compra por
     proveedor (rebudes/biosca/, rebudes/SALTOKI/...) en vez de dejarlas
-    sueltas en rebudes/entrada/."""
+    sueltas en rebudes/entrada/. Piso 9.3: "procesadas" SI se busca
+    aqui (a diferencia de listar_archivos_rebudes) -- un original ya
+    movido ahi tras procesarse sigue siendo su ubicacion legitima."""
     base = os.path.splitext(nombre_json)[0]
     for ext in EXTENSIONES_ORIGINAL:
         ruta = os.path.join(carpeta_origen, base + ext)
@@ -222,7 +235,7 @@ def encontrar_original(carpeta_origen, nombre_json):
     if os.path.isdir(carpeta_origen):
         for nombre_sub in sorted(os.listdir(carpeta_origen)):
             ruta_sub = os.path.join(carpeta_origen, nombre_sub)
-            if not os.path.isdir(ruta_sub) or nombre_sub.lower() in SUBCARPETAS_RESERVADAS:
+            if not os.path.isdir(ruta_sub) or nombre_sub.lower() in SUBCARPETAS_NO_ORIGINALES:
                 continue
             for ext in EXTENSIONES_ORIGINAL:
                 ruta = os.path.join(ruta_sub, base + ext)
@@ -276,6 +289,64 @@ MOTIVO_ERROR_GENERICO = (
     "No s'ha pogut generar la fitxa — l'arxiu és present però no hi ha extracció. "
     "Cal revisar l'escaneig o tornar-ho a intentar."
 )
+
+MOTIVO_ERROR_CORRUPTE = (
+    "L'arxiu original és present però buit o corromput — probablement un "
+    "problema de sincronització. Cal tornar-lo a sincronitzar o demanar-lo de nou."
+)
+
+
+def archivo_corrupto(ruta):
+    """Igual que en informe.py: True si la ruta existe pero esta vacia,
+    o es un PDF sense trailer %%EOF en l'ultim KB (truncat a mitges --
+    p. ex. per una sincronitzacio d'iCloud interrompuda). Piso 9.3."""
+    if not os.path.exists(ruta):
+        return False
+    tamano = os.path.getsize(ruta)
+    if tamano == 0:
+        return True
+    if ruta.lower().endswith(".pdf"):
+        with open(ruta, "rb") as f:
+            f.seek(max(0, tamano - 1024))
+            cola = f.read()
+        if b"%%EOF" not in cola:
+            return True
+    return False
+
+
+def motivo_error(ruta):
+    """Motiu derivat -- no inventat -- per a un archiu ERROR: distingeix
+    corrupcio comprovable en disc del generic 'no hi ha extraccio'."""
+    return MOTIVO_ERROR_CORRUPTE if archivo_corrupto(ruta) else MOTIVO_ERROR_GENERICO
+
+
+def verificar_enlaces_excel(ruta_xlsx, carpeta_cliente):
+    """Piso 9.3: reabre el Excel ya escrito y comprueba cada hyperlink.
+    'Trencat' (no existe) es un bug de codigo y no deberia pasar nunca;
+    'corrupte' (existe pero vacio o truncado) es un problema de datos
+    que ningun cambio de codigo puede arreglar, solo informar."""
+    wb = load_workbook(ruta_xlsx)
+    verificados = 0
+    trencats = []
+    corruptes = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.hyperlink is None:
+                    continue
+                verificados += 1
+                ruta = os.path.join(carpeta_cliente, cell.hyperlink.target)
+                if not os.path.exists(ruta):
+                    trencats.append(cell.hyperlink.target)
+                elif archivo_corrupto(ruta):
+                    corruptes.append(cell.hyperlink.target)
+    print(
+        f"{os.path.basename(carpeta_cliente)} / excel: {verificados} enllaços verificats, "
+        f"{len(trencats)} trencats, {len(corruptes)} corruptes"
+    )
+    for href in trencats:
+        print(f"  TRENCAT: {href}")
+    return trencats, corruptes
 
 
 def escribir_titulo(ws, nombre_cliente, nif_cliente):
@@ -698,7 +769,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
             celda = ws.cell(row=fila, column=1, value=f"[{flujo}] {os.path.basename(ruta)}")
             celda.hyperlink = os.path.relpath(ruta, carpeta_cliente)
             celda.font = ESTILO_ENLACE
-            celda_motivo = ws.cell(row=fila, column=2, value=MOTIVO_ERROR_GENERICO)
+            celda_motivo = ws.cell(row=fila, column=2, value=motivo_error(ruta))
             celda_motivo.alignment = AJUSTE_TEXTO
             for col in range(1, 3):
                 ws.cell(row=fila, column=col).fill = RELLENO_ERROR
@@ -919,3 +990,4 @@ for fila_cliente in leer_clientes():
     ruta_excel = f"{carpeta_cliente}/sumatorios_2026.xlsx"
     wb.save(ruta_excel)
     print(f"Escrito: {ruta_excel}")
+    verificar_enlaces_excel(ruta_excel, carpeta_cliente)
