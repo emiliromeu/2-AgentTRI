@@ -27,3 +27,6 @@ docs/esquema_canonico_v1.md — leerlo antes de tocar código.
    ejemplos, jamás en logs.
 8. Nada está "hecho" sin probarlo contra las facturas reales de
    clientes/penedes_languages/rebudes/entrada.
+9. Nada muere en silencio aplica también al enrutado — todo documento
+   apartado o descartado debe ser visible en el Excel con su
+   justificación.

@@ -10,6 +10,12 @@ ultimo estado de las validadas, no el de la vez anterior.
 Piso 5B: viste el Excel -- bloque de titulo por hoja, colores suaves,
 formato de moneda, bordes en TOTAL/retenciones, anchos de columna y
 ajuste de texto en Motivos. La estructura de datos no cambia.
+
+Piso 6A: hoja final "AVISOS" por cliente (regla 9 de CLAUDE.md --
+nada muere en silencio tampoco en el enrutado): albaranes apartados,
+paginas de ruido leidas de los manifiestos de trocear.py, y avisos de
+consistencia (mismo proveedor, mas de un tipo de IVA). Solo informa,
+no cambia ningun estado OK/REVISAR.
 """
 
 import csv
@@ -167,6 +173,157 @@ def escribir_bloque(ws, fila, titulo, sumas, total_ok, con_retencion, retencion_
     return fila + 1  # una fila en blanco antes del siguiente bloque
 
 
+def cargar_manifiestos(carpeta_lotes_procesados):
+    """Lee todos los *_manifiesto.json de lotes_procesados/. Devuelve
+    lista de (nombre_lote_pdf, documentos). Los lotes procesados antes
+    del piso 6A no tienen manifiesto -- quedan fuera, asumido."""
+    manifiestos = []
+    if not os.path.isdir(carpeta_lotes_procesados):
+        return manifiestos
+    for nombre in sorted(os.listdir(carpeta_lotes_procesados)):
+        if not nombre.endswith("_manifiesto.json"):
+            continue
+        nombre_lote_pdf = nombre[: -len("_manifiesto.json")] + ".pdf"
+        with open(os.path.join(carpeta_lotes_procesados, nombre)) as f:
+            documentos = json.load(f)
+        manifiestos.append((nombre_lote_pdf, documentos))
+    return manifiestos
+
+
+def avisos_consistencia(facturas):
+    """Agrupa por nombre de proveedor (no por nif_proveedor: un NIF mal
+    leido por OCR varia de una factura a otra del mismo proveedor real,
+    mientras que el nombre suele salir igual -- ver el caso del Celler).
+    Devuelve una entrada por proveedor que use mas de un tipo de IVA
+    distinto entre sus facturas -- OK y REVISAR juntas, es solo
+    informativo, no cambia ningun estado."""
+    por_proveedor = {}
+    for nombre, datos in facturas:
+        proveedor = datos.get("proveedor")
+        if proveedor is None:
+            continue
+        entrada = por_proveedor.setdefault(proveedor, {"nifs": set(), "tipos": set(), "archivos": []})
+        nif = datos.get("nif_proveedor")
+        if nif is not None:
+            entrada["nifs"].add(nif)
+        for linea in datos.get("lineas_iva") or []:
+            tipo = linea.get("tipo_iva")
+            if tipo is not None:
+                entrada["tipos"].add(tipo)
+        entrada["archivos"].append(nombre)
+
+    avisos = []
+    for proveedor, info in sorted(por_proveedor.items()):
+        if len(info["tipos"]) > 1:
+            avisos.append((proveedor, sorted(info["nifs"]), sorted(info["tipos"]), info["archivos"]))
+    return avisos
+
+
+def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos):
+    # a) DOCUMENTOS APARTADOS -- albaranes que trocear.py aparta y nadie mas procesa
+    for col in range(1, 3):
+        celda = ws.cell(row=fila, column=col)
+        celda.font = ESTILO_ENCABEZADO
+        celda.fill = RELLENO_BLOQUE
+    ws.cell(row=fila, column=1, value="DOCUMENTOS APARTADOS")
+    fila += 1
+    for col, texto in enumerate(["Archivo", "Justificación"], start=1):
+        ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
+    fila += 1
+
+    carpeta_albarans = f"{carpeta_cliente}/apartados/albarans"
+    nombres_albaran = []
+    if os.path.isdir(carpeta_albarans):
+        nombres_albaran = sorted(
+            n for n in os.listdir(carpeta_albarans) if n.lower().endswith(EXTENSIONES_ORIGINAL)
+        )
+
+    if not nombres_albaran:
+        ws.cell(row=fila, column=1, value="sin documentos apartados")
+        fila += 1
+    else:
+        for nombre in nombres_albaran:
+            celda = ws.cell(row=fila, column=1, value=nombre)
+            ruta_relativa = os.path.relpath(os.path.join(carpeta_albarans, nombre), carpeta_cliente)
+            celda.hyperlink = ruta_relativa
+            celda.font = ESTILO_ENLACE
+            celda_justificacion = ws.cell(
+                row=fila,
+                column=2,
+                value="Albarà: no se contabiliza — la factura posterior agrupa sus albarans. Verificar que esa factura llegó",
+            )
+            celda_justificacion.alignment = AJUSTE_TEXTO
+            fila += 1
+    fila += 1
+
+    # b) PAGINAS DESCARTADAS COMO RUIDO -- leidas de los manifiestos de trocear.py
+    for col in range(1, 4):
+        celda = ws.cell(row=fila, column=col)
+        celda.font = ESTILO_ENCABEZADO
+        celda.fill = RELLENO_BLOQUE
+    ws.cell(row=fila, column=1, value="PÁGINAS DESCARTADAS COMO RUIDO")
+    fila += 1
+    for col, texto in enumerate(["Lote", "Páginas", "Pista"], start=1):
+        ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
+    fila += 1
+
+    manifiestos = cargar_manifiestos(f"{carpeta_cliente}/rebudes/lotes_procesados")
+    filas_ruido = [
+        (nombre_lote, doc)
+        for nombre_lote, documentos in manifiestos
+        for doc in documentos
+        if doc.get("tipo") == "ruido"
+    ]
+
+    if not manifiestos:
+        ws.cell(row=fila, column=1, value="sin datos de lotes anteriores")
+        fila += 1
+    elif not filas_ruido:
+        ws.cell(row=fila, column=1, value="sin páginas de ruido")
+        fila += 1
+    else:
+        for nombre_lote, doc in filas_ruido:
+            celda = ws.cell(row=fila, column=1, value=nombre_lote)
+            ruta_lote = os.path.join(carpeta_cliente, "rebudes/lotes_procesados", nombre_lote)
+            if os.path.exists(ruta_lote):
+                celda.hyperlink = os.path.relpath(ruta_lote, carpeta_cliente)
+                celda.font = ESTILO_ENLACE
+            ws.cell(row=fila, column=2, value=f"p{doc['pagina_inicio']}-{doc['pagina_fin']}")
+            ws.cell(row=fila, column=3, value=doc.get("emisor_pista"))
+            fila += 1
+    fila += 1
+
+    # c) AVISOS DE CONSISTENCIA -- mismo proveedor, mas de un tipo de IVA
+    for col in range(1, 6):
+        celda = ws.cell(row=fila, column=col)
+        celda.font = ESTILO_ENCABEZADO
+        celda.fill = RELLENO_BLOQUE
+    ws.cell(row=fila, column=1, value="AVISOS DE CONSISTENCIA")
+    fila += 1
+    for col, texto in enumerate(["Flujo", "Proveedor", "NIF", "Tipos de IVA", "Archivos afectados"], start=1):
+        ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
+    fila += 1
+
+    filas_consistencia = [("GASTO", a) for a in avisos_consistencia(gastos)] + [
+        ("INGRESO", a) for a in avisos_consistencia(ingresos)
+    ]
+
+    if not filas_consistencia:
+        ws.cell(row=fila, column=1, value="sin avisos de consistencia")
+        fila += 1
+    else:
+        for flujo, (proveedor, nifs, tipos, archivos) in filas_consistencia:
+            ws.cell(row=fila, column=1, value=flujo)
+            ws.cell(row=fila, column=2, value=proveedor)
+            ws.cell(row=fila, column=3, value=" / ".join(nifs))
+            ws.cell(row=fila, column=4, value="{" + ", ".join(str(t) for t in tipos) + "}")
+            celda_archivos = ws.cell(row=fila, column=5, value="; ".join(archivos))
+            celda_archivos.alignment = AJUSTE_TEXTO
+            fila += 1
+
+    return len(nombres_albaran), len(filas_ruido), len(filas_consistencia), bool(manifiestos)
+
+
 def escribir_pendientes(ws, fila, pendientes, carpeta_cliente):
     for col in range(1, 4):
         celda = ws.cell(row=fila, column=col)
@@ -258,6 +415,20 @@ for fila_cliente in leer_clientes():
 
         if pendientes:
             escribir_pendientes(ws, fila, pendientes, carpeta_cliente)
+
+    ws_avisos = wb.create_sheet("AVISOS")
+    ws_avisos.column_dimensions["A"].width = 55
+    ws_avisos.column_dimensions["B"].width = 70
+    ws_avisos.column_dimensions["C"].width = 20
+    ws_avisos.column_dimensions["D"].width = 20
+    ws_avisos.column_dimensions["E"].width = 70
+
+    fila = escribir_titulo(ws_avisos, fila_cliente["nombre"], fila_cliente["nif"])
+    n_albaranes, n_ruido, n_consistencia, hay_manifiestos = escribir_avisos(
+        ws_avisos, fila, carpeta_cliente, gastos, ingresos
+    )
+    detalle_ruido = f"{n_ruido} páginas de ruido" if hay_manifiestos else "sin datos de lotes anteriores"
+    print(f"{carpeta} / AVISOS: {n_albaranes} documentos apartados, {detalle_ruido}, {n_consistencia} avisos de consistencia")
 
     ruta_excel = f"{carpeta_cliente}/sumatorios_2026.xlsx"
     wb.save(ruta_excel)

@@ -6,6 +6,10 @@ documentos pegados. Este script le pide a Claude un manifiesto (que
 paginas son que documento), lo valida en codigo, y corta cada trozo con
 pypdf a su carpeta de destino -- para que extraer_todas.py y validar.py
 puedan seguir trabajando sobre facturas individuales como ya hacen.
+
+Piso 6A: cada lote procesado con exito guarda su manifiesto completo
+en lotes_procesados/ -- registro permanente de que se decidio sobre
+cada pagina (regla 9 de CLAUDE.md), que sumar.py lee para la hoja AVISOS.
 """
 
 import base64
@@ -145,6 +149,7 @@ for fila in leer_clientes():
     for nombre_lote in nombres_lote:
         ruta_lote = os.path.join(ruta_lotes, nombre_lote)
         ruta_destino_procesado = os.path.join(ruta_procesados, nombre_lote)
+        base_lote = os.path.splitext(nombre_lote)[0]
 
         if os.path.exists(ruta_destino_procesado):
             print(f"saltado: {nombre_lote}")
@@ -218,13 +223,18 @@ for fila in leer_clientes():
                 carpeta_destino = f"clientes/{carpeta}/{DESTINO_POR_TIPO[tipo]}"
                 os.makedirs(carpeta_destino, exist_ok=True)
 
-                base_lote = os.path.splitext(nombre_lote)[0]
                 emisor = nombre_seguro(doc.get("emisor_pista") or "desconocido")
                 nombre_salida = f"{base_lote}_p{doc['pagina_inicio']:03d}-{doc['pagina_fin']:03d}_{emisor}.pdf"
                 ruta_salida = os.path.join(carpeta_destino, nombre_salida)
 
                 escribir_sub_pdf(reader, doc["pagina_inicio"], doc["pagina_fin"], ruta_salida)
                 print(f"cortado ({tipo}): {nombre_salida}")
+
+            # Guardar el manifiesto completo (regla 9: nada muere en silencio,
+            # tampoco el enrutado -- sumar.py lo lee para la hoja AVISOS)
+            ruta_manifiesto = os.path.join(ruta_procesados, base_lote + "_manifiesto.json")
+            with open(ruta_manifiesto, "w") as f:
+                json.dump(documentos, f, indent=2, ensure_ascii=False)
 
             os.rename(ruta_lote, ruta_destino_procesado)
             print(f"procesado: {nombre_lote}")
