@@ -37,6 +37,11 @@ total negativo. Dos verificaciones puras (letra de NIF, cuadre de
 retencion) que solo avisan, nunca cambian estado ni suma. Seccion
 ERRORS en AVISOS -- archivos presentes sin ficha extraida, motivo
 generico porque extraer_todas.py no persiste la razon del fallo.
+
+Piso 9.2: decisions.csv (archivo,accion,nota,qui,data) -- 'aprovar'
+hace que una REVISAR cuente como OK; 'descartar' la saca de toda suma
+y la manda a un bloque DESCARTATS propio. Sin decisions.csv, o vacio,
+el comportamiento es identico al de antes de este piso.
 """
 
 import csv
@@ -175,6 +180,23 @@ def cargar_validadas(carpeta):
     return facturas
 
 
+def cargar_decisiones(carpeta_cliente):
+    """Lee decisions.csv (archivo,accion,nota,qui,data) si existe. Sin
+    archivo, o vacio, devuelve {} -- el comportamiento es identico al
+    de antes de este piso. Solo aplica a facturas ya validadas (los
+    ERROR no tienen ficha, no son aprobables)."""
+    ruta = f"{carpeta_cliente}/decisions.csv"
+    decisiones = {}
+    if not os.path.exists(ruta):
+        return decisiones
+    with open(ruta) as f:
+        for fila in csv.DictReader(f):
+            archivo = fila.get("archivo")
+            if archivo:
+                decisiones[archivo] = fila
+    return decisiones
+
+
 def trimestre_de(fecha):
     """'2026-04-21' -> '2T'. Si la fecha falta o no se puede leer, None."""
     if not fecha:
@@ -264,20 +286,35 @@ def escribir_titulo(ws, nombre_cliente, nif_cliente):
     return 6  # fila 5 en blanco, el resto empieza en la 6
 
 
-def sumar_bloque(facturas):
+def sumar_bloque(facturas, decisiones):
     """Suma un bloque (gastos o ingresos) de un trimestre: base/cuota
-    por tipo de IVA, total y retencion de las OK, y aparte la lista de
-    las que hay que revisar."""
+    por tipo de IVA, total y retencion de las que cuentan, y aparte
+    las que hay que revisar y las descartadas.
+
+    decisiones (de decisions.csv) puede anular el estado de una ficha:
+    'aprovar' hace que una REVISAR cuente como si fuera OK; 'descartar'
+    hace que nunca cuente (ni las OK), y va a su propio bloque. Sin
+    decisiones.csv, o vacio, el comportamiento es identico al de
+    siempre (ninguna entrada tiene decision)."""
     sumas = {tipo: {"base": 0.0, "cuota": 0.0} for tipo in TIPOS_IVA}
     sumas["otros"] = {"base": 0.0, "cuota": 0.0}
     total_ok = 0.0
     retencion_ok = 0.0
     revisar = []
+    descartados = []
 
     for nombre, datos in facturas:
-        if datos.get("estado") != "OK":
+        decision = decisiones.get(nombre)
+
+        if decision and decision.get("accion") == "descartar":
+            descartados.append((nombre, datos, decision))
+            continue
+
+        cuenta = datos.get("estado") == "OK" or (decision and decision.get("accion") == "aprovar")
+        if not cuenta:
             revisar.append((nombre, datos))
             continue
+
         for linea in datos.get("lineas_iva") or []:
             tipo = linea.get("tipo_iva")
             clave = tipo if tipo in TIPOS_IVA else "otros"
@@ -286,7 +323,7 @@ def sumar_bloque(facturas):
         total_ok += datos.get("total") or 0
         retencion_ok += datos.get("retencion_cuota") or 0
 
-    return sumas, total_ok, retencion_ok, revisar
+    return sumas, total_ok, retencion_ok, revisar, descartados
 
 
 def escribir_bloque(ws, fila, titulo, sumas, total_ok, con_retencion, retencion_ok):
@@ -404,10 +441,10 @@ def escribir_resultat_trimestre(ws, fila, sumas_g, sumas_i):
 COLUMNAS_DETALLE = ["Data", "Núm. factura", "Proveïdor", "NIF", "Base", "%IVA", "Quota", "Total", "Estat"]
 
 
-def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_cliente):
-    """Una fila por linea de IVA de cada factura (OK y REVISAR juntas) --
-    para poder auditar de donde sale cada suma de los bloques de arriba.
-    No cambia ningun total: es solo para mirar."""
+def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_cliente, decisiones):
+    """Una fila por linea de IVA de cada factura (OK, REVISAR y
+    DESCARTAT juntas) -- para poder auditar de donde sale cada suma de
+    los bloques de arriba. No cambia ningun total: es solo para mirar."""
     for col in range(1, len(COLUMNAS_DETALLE) + 1):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
@@ -423,6 +460,7 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
         estado = datos.get("estado")
         lineas = datos.get("lineas_iva") or [{}]
         ruta_original = encontrar_original(carpeta_original, nombre)
+        decision = decisiones.get(nombre)
 
         es_abonament = (datos.get("total") or 0) < 0
         tiene_avisos = (
@@ -430,7 +468,17 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
             or validar_nif(datos.get("nif_receptor")) is False
             or not verificar_retencion(datos)
         )
-        estado_mostrado = estado
+
+        if decision and decision.get("accion") == "descartar":
+            estado_mostrado = f"DESCARTAT ({decision.get('nota', '')})"
+            relleno = RELLENO_DESCARTAT
+        elif decision and decision.get("accion") == "aprovar":
+            estado_mostrado = f"OK ★ (aprovat manualment per {decision.get('qui', '')}, {decision.get('data', '')})"
+            relleno = RELLENO_OK
+        else:
+            estado_mostrado = estado
+            relleno = RELLENO_AVISO if estado == "REVISAR" else RELLENO_OK
+
         if es_abonament:
             estado_mostrado += " (ABONAMENT)"
         if tiene_avisos:
@@ -454,7 +502,6 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
             celda_total.number_format = FORMATO_MONEDA
             ws.cell(row=fila, column=9, value=estado_mostrado)
 
-            relleno = RELLENO_AVISO if estado == "REVISAR" else RELLENO_OK
             for col in range(1, len(COLUMNAS_DETALLE) + 1):
                 ws.cell(row=fila, column=col).fill = relleno
 
@@ -722,6 +769,36 @@ def escribir_pendientes(ws, fila, pendientes, carpeta_cliente):
     return fila + 1
 
 
+def escribir_descartados(ws, fila, descartados, carpeta_cliente):
+    """Facturas con decisions.csv accion=descartar -- nunca cuentan en
+    ninguna suma, se listan aparte con su nota."""
+    for col in range(1, 4):
+        celda = ws.cell(row=fila, column=col)
+        celda.font = ESTILO_ENCABEZADO
+        celda.fill = RELLENO_DESCARTAT
+    ws.cell(row=fila, column=1, value="DESCARTATS")
+    fila += 1
+    for col, texto in enumerate(["Fitxer", "Tipus", "Nota"], start=1):
+        ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
+    fila += 1
+
+    for nombre, datos, tipo_bloque, carpeta_original, decision in descartados:
+        celda = ws.cell(row=fila, column=1, value=nombre)
+        ruta_original = encontrar_original(carpeta_original, nombre)
+        if ruta_original:
+            celda.hyperlink = os.path.relpath(ruta_original, carpeta_cliente)
+            celda.font = ESTILO_ENLACE
+        ws.cell(row=fila, column=2, value=tipo_bloque)
+        nota = decision.get("nota") or ""
+        qui = decision.get("qui") or ""
+        data = decision.get("data") or ""
+        celda_nota = ws.cell(row=fila, column=3, value=f"{nota} ({qui}, {data})")
+        celda_nota.alignment = AJUSTE_TEXTO
+        fila += 1
+
+    return fila + 1
+
+
 for fila_cliente in leer_clientes():
     carpeta = fila_cliente["carpeta"]
     carpeta_cliente = f"clientes/{carpeta}"
@@ -734,6 +811,12 @@ for fila_cliente in leer_clientes():
 
     origen_gastos = f"{carpeta_cliente}/rebudes"
     origen_ingressos = f"{carpeta_cliente}/{RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, 'apartados/ingressos')}"
+
+    decisiones = cargar_decisiones(carpeta_cliente)
+    nombres_validos = {n for n, _ in gastos} | {n for n, _ in ingresos}
+    for archivo in decisiones:
+        if archivo not in nombres_validos:
+            print(f"AVISO: decisions.csv de {carpeta} referencia un archivo que no existe entre las validadas: {archivo}")
 
     # Agrupar por trimestre (o SIN FECHA si una REVISAR no trae fecha_factura)
     trimestres = {}
@@ -767,26 +850,27 @@ for fila_cliente in leer_clientes():
 
         fila = escribir_titulo(ws, fila_cliente["nombre"], fila_cliente["nif"])
         pendientes = []
+        descartados_totales = []
 
         if trimestre != "SIN FECHA":
-            sumas_g, total_g, _, revisar_g = sumar_bloque(datos_trimestre["gastos"])
-            sumas_i, total_i, retencion_i, revisar_i = sumar_bloque(datos_trimestre["ingresos"])
+            sumas_g, total_g, _, revisar_g, descartados_g = sumar_bloque(datos_trimestre["gastos"], decisiones)
+            sumas_i, total_i, retencion_i, revisar_i, descartados_i = sumar_bloque(datos_trimestre["ingresos"], decisiones)
 
             fila, _, _ = escribir_resultat_trimestre(ws, fila, sumas_g, sumas_i)
 
             fila = escribir_bloque(ws, fila, "DESPESES", sumas_g, total_g, con_retencion=False, retencion_ok=0)
             fila = escribir_bloque(ws, fila, "INGRESSOS", sumas_i, total_i, con_retencion=True, retencion_ok=retencion_i)
 
-            n_ok_g = len(datos_trimestre["gastos"]) - len(revisar_g)
-            n_ok_i = len(datos_trimestre["ingresos"]) - len(revisar_i)
+            n_ok_g = len(datos_trimestre["gastos"]) - len(revisar_g) - len(descartados_g)
+            n_ok_i = len(datos_trimestre["ingresos"]) - len(revisar_i) - len(descartados_i)
             print(
                 f"{carpeta} / {trimestre}: GASTOS total={total_g:.2f} ({n_ok_g} OK, {len(revisar_g)} a revisar) | "
                 f"INGRESOS total={total_i:.2f} ({n_ok_i} OK, {len(revisar_i)} a revisar)"
             )
         else:
             # Sin fecha no hay nada que sumar por trimestre -- solo se lista para revisar
-            _, _, _, revisar_g = sumar_bloque(datos_trimestre["gastos"])
-            _, _, _, revisar_i = sumar_bloque(datos_trimestre["ingresos"])
+            _, _, _, revisar_g, descartados_g = sumar_bloque(datos_trimestre["gastos"], decisiones)
+            _, _, _, revisar_i, descartados_i = sumar_bloque(datos_trimestre["ingresos"], decisiones)
             print(f"{carpeta} / SIN FECHA: {len(revisar_g) + len(revisar_i)} a revisar (sin fecha_factura)")
 
         for nombre, datos in revisar_g:
@@ -797,14 +881,22 @@ for fila_cliente in leer_clientes():
         if pendientes:
             fila = escribir_pendientes(ws, fila, pendientes, carpeta_cliente)
 
+        for nombre, datos, decision in descartados_g:
+            descartados_totales.append((nombre, datos, "DESPESA", f"{carpeta_cliente}/rebudes", decision))
+        for nombre, datos, decision in descartados_i:
+            descartados_totales.append((nombre, datos, "INGRÉS", f"{carpeta_cliente}/{origen_ingressos}", decision))
+
+        if descartados_totales:
+            fila = escribir_descartados(ws, fila, descartados_totales, carpeta_cliente)
+
         if trimestre != "SIN FECHA":
             fila = escribir_detalle(
                 ws, fila, "DETALL DESPESES", datos_trimestre["gastos"],
-                f"{carpeta_cliente}/rebudes", carpeta_cliente,
+                f"{carpeta_cliente}/rebudes", carpeta_cliente, decisiones,
             )
             fila = escribir_detalle(
                 ws, fila, "DETALL INGRESSOS", datos_trimestre["ingresos"],
-                f"{carpeta_cliente}/{origen_ingressos}", carpeta_cliente,
+                f"{carpeta_cliente}/{origen_ingressos}", carpeta_cliente, decisiones,
             )
 
     ws_avisos = wb.create_sheet("AVISOS")

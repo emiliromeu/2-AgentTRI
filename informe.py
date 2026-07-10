@@ -25,6 +25,12 @@ Piso 9.1: RESULTAT DEL TRIMESTRE amb taula de quotes per tipus d'IVA
 pures (lletra de NIF, quadre de retencio) -- avisen amb ⚠, mai canvien
 estat ni suma. Seccio Errors dins d'Avisos -- fitxers presents sense
 extraccio, amb motiu generic (extraer_todas.py no el guarda).
+
+Piso 9.2: decisions.csv (archivo,accion,nota,qui,data) -- 'aprovar' fa
+que una targeta REVISAR compti com OK i mostri un distintiu; 'descartar'
+la treu de la llista normal i la porta a una seccio Descartats propia
+per trimestre. Sense decisions.csv, o buit, el comportament es identic
+al d'abans d'aquest pis.
 """
 
 import base64
@@ -167,6 +173,22 @@ def cargar_validadas(carpeta):
     return facturas
 
 
+def cargar_decisiones(carpeta_cliente):
+    """Igual que en sumar.py: lee decisions.csv si existe. Sin
+    archivo, o vacio, devuelve {} -- comportamiento identico al de
+    antes de este piso."""
+    ruta = f"{carpeta_cliente}/decisions.csv"
+    decisiones = {}
+    if not os.path.exists(ruta):
+        return decisiones
+    with open(ruta) as f:
+        for fila in csv.DictReader(f):
+            archivo = fila.get("archivo")
+            if archivo:
+                decisiones[archivo] = fila
+    return decisiones
+
+
 def trimestre_de(fecha):
     if not fecha:
         return None
@@ -262,24 +284,35 @@ def avisos_consistencia(facturas):
     return avisos
 
 
-def sumar_bloque(facturas):
-    """Igual que en sumar.py: total y cuota por tipo de IVA de las OK,
-    y aparte la lista de las que hay que revisar (las REVISAR no
-    entran en ningun total)."""
+def sumar_bloque(facturas, decisiones):
+    """Igual que en sumar.py: total y cuota por tipo de IVA de las que
+    cuentan, y aparte revisar y descartados. decisions.csv puede
+    anular el estado: 'aprovar' hace que una REVISAR cuente como OK;
+    'descartar' nunca cuenta y va aparte. Sin decisions.csv, o vacio,
+    el comportamiento es identico al de antes de este piso."""
     sumas = {tipo: {"cuota": 0.0} for tipo in TIPOS_IVA}
     sumas["otros"] = {"cuota": 0.0}
     total_ok = 0.0
     revisar = []
+    descartados = []
     for nombre, datos in facturas:
-        if datos.get("estado") != "OK":
+        decision = decisiones.get(nombre)
+
+        if decision and decision.get("accion") == "descartar":
+            descartados.append((nombre, datos, decision))
+            continue
+
+        cuenta = datos.get("estado") == "OK" or (decision and decision.get("accion") == "aprovar")
+        if not cuenta:
             revisar.append((nombre, datos))
             continue
+
         total_ok += datos.get("total") or 0
         for linea in datos.get("lineas_iva") or []:
             tipo = linea.get("tipo_iva")
             clave = tipo if tipo in TIPOS_IVA else "otros"
             sumas[clave]["cuota"] += linea.get("cuota") or 0
-    return total_ok, sumas, revisar
+    return total_ok, sumas, revisar, descartados
 
 
 def ruta_relativa_html(ruta_original, carpeta_cliente):
@@ -294,9 +327,11 @@ def esc(valor):
     return html.escape(str(valor)) if valor is not None else ""
 
 
-def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_cliente):
+def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_cliente, decision=None):
     """Fitxa completa d'UNA factura, OK o REVISAR. Esquerra: tots els
-    camps extrets. Dreta: imatge incrustada (jpg/png) o enllaç gran (pdf)."""
+    camps extrets. Dreta: imatge incrustada (jpg/png) o enllaç gran (pdf).
+    decision (Piso 9.2): fila de decisions.csv si n'hi ha una per aquest
+    archivo -- 'aprovar' mostra un distintiu i pinta la targeta com OK."""
     ruta_original = encontrar_original(carpeta_original, nombre)
     extension = os.path.splitext(ruta_original)[1].lower() if ruta_original else None
 
@@ -334,7 +369,8 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         f"<p><strong>Observacions de lectura:</strong> {esc(observaciones)}</p>" if observaciones else ""
     )
 
-    clase_estado = "revisar" if estado == "REVISAR" else "ok"
+    accion_decision = decision.get("accion") if decision else None
+    clase_estado = "ok" if (estado != "REVISAR" or accion_decision == "aprovar") else "revisar"
 
     es_abonament = (datos.get("total") or 0) < 0
     abonament_html = '<span class="etiqueta-abonament">ABONAMENT</span>' if es_abonament else ""
@@ -346,6 +382,15 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
     )
     avisos_html = '<span class="etiqueta-verificacio">⚠ verificació</span>' if tiene_avisos else ""
 
+    decisio_html = ""
+    nota_decisio_html = ""
+    if accion_decision == "aprovar":
+        qui = esc(decision.get("qui"))
+        data_decisio = esc(decision.get("data"))
+        decisio_html = f'<span class="etiqueta-decisio aprovat">★ Aprovat manualment ({qui}, {data_decisio})</span>'
+        if decision.get("nota"):
+            nota_decisio_html = f"<p class=\"nota-decisio\"><strong>Nota:</strong> {esc(decision.get('nota'))}</p>"
+
     return f"""
     <div class="tarjeta {clase_estado}">
       <div class="tarjeta-izq">
@@ -353,6 +398,7 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         <span class="etiqueta-estado">{esc(estado)}</span>
         {abonament_html}
         {avisos_html}
+        {decisio_html}
         <h3>{esc(datos.get("proveedor"))}</h3>
         <p>NIF: {esc(datos.get("nif_proveedor"))} · Factura: {esc(datos.get("num_factura"))} · Data: {esc(datos.get("fecha_factura"))}</p>
         <ul class="lineas-iva">{lineas_html}</ul>
@@ -361,6 +407,7 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         <p class="archivo">{esc(nombre)}</p>
         {motivos_html}
         {observaciones_html}
+        {nota_decisio_html}
       </div>
       <div class="tarjeta-der">{lado_derecho}</div>
     </div>"""
@@ -369,19 +416,52 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
 TIPO_BLOQUE_SINGULAR = {"DESPESES": "DESPESA", "INGRESSOS": "INGRÉS"}
 
 
-def seccion_flujo(titulo, facturas, carpeta_original, carpeta_cliente):
-    total_ok, sumas, revisar = sumar_bloque(facturas)
+def seccion_flujo(titulo, facturas, carpeta_original, carpeta_cliente, decisiones):
+    total_ok, sumas, revisar, descartados = sumar_bloque(facturas, decisiones)
     tipo_bloque = TIPO_BLOQUE_SINGULAR[titulo]
+    nombres_descartados = {nombre for nombre, _, _ in descartados}
     tarjetas = "".join(
-        tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_cliente)
+        tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_cliente, decisiones.get(nombre))
         for nombre, datos in facturas
+        if nombre not in nombres_descartados
     )
-    resumen = f"{titulo} — {len(facturas)} factures, {len(revisar)} a revisar — {total_ok:.2f} €"
+    n_mostradas = len(facturas) - len(descartados)
+    resumen = f"{titulo} — {n_mostradas} factures, {len(revisar)} a revisar — {total_ok:.2f} €"
+    descartados_con_origen = [
+        (nombre, datos, tipo_bloque, carpeta_original, decision) for nombre, datos, decision in descartados
+    ]
     return f"""
     <details>
       <summary>{esc(resumen)}</summary>
       {tarjetas if tarjetas else "<p>Sense factures.</p>"}
-    </details>""", total_ok, sumas
+    </details>""", total_ok, sumas, descartados_con_origen
+
+
+def seccion_descartats(descartados, carpeta_cliente):
+    """Facturas amb decisions.csv accio=descartar -- mai compten en
+    cap suma, es llisten a part amb la seva nota (mirall del bloc
+    DESCARTATS de sumar.py)."""
+    filas = ""
+    for nombre, datos, tipo_bloque, carpeta_original, decision in descartados:
+        ruta_original = encontrar_original(carpeta_original, nombre)
+        if ruta_original:
+            href = ruta_relativa_html(ruta_original, carpeta_cliente)
+            enlace = f'<a href="{href}" target="_blank">{esc(nombre)} ↗</a>'
+        else:
+            enlace = esc(nombre)
+        nota = decision.get("nota") or ""
+        qui = decision.get("qui") or ""
+        data_decisio = decision.get("data") or ""
+        filas += f"""<tr><td>{enlace}</td><td>{esc(tipo_bloque)}</td>
+            <td>{esc(nota)} ({esc(qui)}, {esc(data_decisio)})</td></tr>"""
+    return f"""
+    <details>
+      <summary>Descartats — {len(descartados)}</summary>
+      <table class="descartats">
+        <thead><tr><th>Fitxer</th><th>Tipus</th><th>Nota</th></tr></thead>
+        <tbody>{filas}</tbody>
+      </table>
+    </details>"""
 
 
 def tabla_resultat_trimestre(sumas_g, sumas_i):
@@ -423,13 +503,19 @@ def tabla_resultat_trimestre(sumas_g, sumas_i):
     """
 
 
-def seccion_trimestre(trimestre, datos_t, carpeta_cliente, origen_gastos, origen_ingressos):
-    html_gastos, total_g, sumas_g = seccion_flujo("DESPESES", datos_t["gastos"], origen_gastos, carpeta_cliente)
-    html_ingresos, total_i, sumas_i = seccion_flujo("INGRESSOS", datos_t["ingresos"], origen_ingressos, carpeta_cliente)
+def seccion_trimestre(trimestre, datos_t, carpeta_cliente, origen_gastos, origen_ingressos, decisiones):
+    html_gastos, total_g, sumas_g, descartats_g = seccion_flujo(
+        "DESPESES", datos_t["gastos"], origen_gastos, carpeta_cliente, decisiones
+    )
+    html_ingresos, total_i, sumas_i, descartats_i = seccion_flujo(
+        "INGRESSOS", datos_t["ingresos"], origen_ingressos, carpeta_cliente, decisiones
+    )
     n_total = len(datos_t["gastos"]) + len(datos_t["ingresos"])
     resumen = f"{trimestre} — {n_total} factures ({total_g:.2f} € despeses, {total_i:.2f} € ingressos)"
 
     resultat_html = tabla_resultat_trimestre(sumas_g, sumas_i)
+    descartats_totales = descartats_g + descartats_i
+    descartats_html = seccion_descartats(descartats_totales, carpeta_cliente) if descartats_totales else ""
 
     return f"""
     <details>
@@ -437,6 +523,7 @@ def seccion_trimestre(trimestre, datos_t, carpeta_cliente, origen_gastos, origen
       {resultat_html}
       {html_gastos}
       {html_ingresos}
+      {descartats_html}
     </details>""", total_g, total_i
 
 
@@ -623,13 +710,16 @@ p.resultat-iva .nota { font-size: 0.8rem; font-style: italic; color: #555; }
 .tarjeta-izq { flex: 1; }
 .tarjeta-der { flex: 1; display: flex; align-items: center; justify-content: center; }
 .tarjeta-der img { max-width: 100%; max-height: 500px; border-radius: 4px; }
-.etiqueta-tipo, .etiqueta-estado, .etiqueta-abonament, .etiqueta-verificacio {
+.etiqueta-tipo, .etiqueta-estado, .etiqueta-abonament, .etiqueta-verificacio, .etiqueta-decisio {
   display: inline-block; padding: 0.15rem 0.6rem; border-radius: 4px;
   font-size: 0.8rem; font-weight: bold; background: #fff; margin-right: 0.3rem; }
 .etiqueta-abonament { background: #FBE5D6; color: #833C00; }
 .etiqueta-verificacio { background: #FFC7CE; color: #9C0006; }
+.etiqueta-decisio.aprovat { background: #E2EFDA; color: #375623; }
 .lineas-iva { margin: 0.3rem 0; padding-left: 1.2rem; }
 .archivo { font-family: monospace; font-size: 0.8rem; color: #555; }
+.nota-decisio { font-style: italic; }
+table.descartats tbody tr { background: #E7E6E6; }
 .btn-abrir { display: inline-block; background: #0563C1; color: white; padding: 0.8rem 1.5rem;
              border-radius: 6px; text-decoration: none; font-weight: bold; }
 .sin-original { color: #a33; font-style: italic; }
@@ -650,7 +740,9 @@ table.errors tbody tr { background: #FFC7CE; }
   .etiqueta-tipo, .etiqueta-estado { background: #333; }
   .etiqueta-abonament { background: #4a3423; color: #f0c090; }
   .etiqueta-verificacio { background: #4a2323; color: #f0a0a0; }
+  .etiqueta-decisio.aprovat { background: #22331f; color: #b7d7a8; }
   table.errors tbody tr { background: #4a2323; }
+  table.descartats tbody tr { background: #333; }
   .archivo { color: #aaa; }
   .conciliacio-flux { background: #262626; }
   p.resultat-iva { background: #223; }
@@ -678,6 +770,12 @@ for fila_cliente in leer_clientes():
 
     origen_gastos = f"{carpeta_cliente}/rebudes"
     origen_ingressos = f"{carpeta_cliente}/{RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, 'apartados/ingressos')}"
+
+    decisiones = cargar_decisiones(carpeta_cliente)
+    nombres_validos = {n for n, _ in gastos} | {n for n, _ in ingresos}
+    for archivo in decisiones:
+        if archivo not in nombres_validos:
+            print(f"AVISO: decisions.csv de {carpeta} referencia un archivo que no existe entre las validadas: {archivo}")
 
     # Panel CONCILIACIO -- solo lectura de disco
     presentes_gastos = len(listar_archivos_rebudes(origen_gastos))
@@ -733,18 +831,25 @@ for fila_cliente in leer_clientes():
         n_tarjetas += len(datos_t["gastos"]) + len(datos_t["ingresos"])
 
         if trimestre == "SIN FECHA":
-            html_gastos, total_g, _ = seccion_flujo("DESPESES", datos_t["gastos"], origen_gastos, carpeta_cliente)
-            html_ingresos, total_i, _ = seccion_flujo("INGRESSOS", datos_t["ingresos"], origen_ingressos, carpeta_cliente)
+            html_gastos, total_g, _, descartats_g = seccion_flujo(
+                "DESPESES", datos_t["gastos"], origen_gastos, carpeta_cliente, decisiones
+            )
+            html_ingresos, total_i, _, descartats_i = seccion_flujo(
+                "INGRESSOS", datos_t["ingresos"], origen_ingressos, carpeta_cliente, decisiones
+            )
+            descartats_totales = descartats_g + descartats_i
+            descartats_html = seccion_descartats(descartats_totales, carpeta_cliente) if descartats_totales else ""
             secciones_html.append(f"""
             <details>
               <summary class="resumen-trimestre">SENSE DATA — {len(datos_t["gastos"]) + len(datos_t["ingresos"])} factures</summary>
               {html_gastos}
               {html_ingresos}
+              {descartats_html}
             </details>""")
             continue
 
         html_trimestre, total_g, total_i = seccion_trimestre(
-            trimestre, datos_t, carpeta_cliente, origen_gastos, origen_ingressos
+            trimestre, datos_t, carpeta_cliente, origen_gastos, origen_ingressos, decisiones
         )
         secciones_html.append(html_trimestre)
         filas_comparacion.append((trimestre, "DESPESES", total_g))
