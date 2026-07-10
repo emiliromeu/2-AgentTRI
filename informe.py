@@ -19,6 +19,12 @@ Verd suau per OK, taronja per REVISAR. Observacions de lectura a les
 targetes. Panell CONCILIACIO (nomes lectura de disc). Seccio Avisos
 (la mateixa info que la fulla AVISOS de l'Excel, amb enllacos). I
 clientes/index.html com a portada. Cap total canvia.
+
+Piso 9.1: RESULTAT DEL TRIMESTRE amb taula de quotes per tipus d'IVA
+(no nomes la linia). Etiqueta ABONAMENT (total negatiu). Verificacions
+pures (lletra de NIF, quadre de retencio) -- avisen amb ⚠, mai canvien
+estat ni suma. Seccio Errors dins d'Avisos -- fitxers presents sense
+extraccio, amb motiu generic (extraer_todas.py no el guarda).
 """
 
 import base64
@@ -29,6 +35,7 @@ import os
 from datetime import datetime
 from urllib.parse import quote
 
+TIPOS_IVA = [0, 4, 5, 10, 12, 21]
 EXTENSIONES_ORIGINAL = (".pdf", ".jpg", ".jpeg", ".png")
 EXTENSIONES_IMAGEN = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
 
@@ -60,6 +67,87 @@ def traducir_motivo(motivo):
     for es, ca in TRADUCCIONES_MOTIVO:
         motivo = motivo.replace(es, ca)
     return motivo
+
+
+TABLA_LETRA_DNI = "TRWAGMYFPDXBNJZSQVHLCKE"
+
+
+def validar_nif(nif):
+    """Igual que en sumar.py: verificacion pura de la letra de control
+    de un NIF espanyol (DNI, NIE o CIF). True/False si reconoce el
+    formato; None si no tiene forma reconocible (ej. NIF extranjero) --
+    no se avisa en ese caso. No cambia ningun estado ni suma."""
+    if nif is None:
+        return None
+    n = "".join(c for c in nif if c.isalnum()).upper()
+
+    if len(n) == 9 and n[:8].isdigit() and n[8].isalpha():
+        return TABLA_LETRA_DNI[int(n[:8]) % 23] == n[8]
+
+    if len(n) == 9 and n[0] in "XYZ" and n[1:8].isdigit() and n[8].isalpha():
+        prefijo = {"X": "0", "Y": "1", "Z": "2"}[n[0]]
+        return TABLA_LETRA_DNI[int(prefijo + n[1:8]) % 23] == n[8]
+
+    if len(n) == 9 and n[0] in "ABCDEFGHJKLMNPQRSUVW" and n[1:8].isdigit() and (n[8].isdigit() or n[8].isalpha()):
+        digitos = n[1:8]
+        suma_par = sum(int(d) for d in digitos[1::2])
+        suma_impar = 0
+        for d in digitos[0::2]:
+            doble = int(d) * 2
+            suma_impar += doble // 10 + doble % 10
+        digito_control = (10 - (suma_par + suma_impar) % 10) % 10
+        letra_control = "JABCDEFGHI"[digito_control]
+        if n[0] in "ABEH":
+            return n[8] == str(digito_control)
+        if n[0] in "KPQS":
+            return n[8] == letra_control
+        return n[8] == str(digito_control) or n[8] == letra_control
+
+    return None
+
+
+def verificar_retencion(datos):
+    """Igual que en sumar.py: True si no hay retencion o si cuadra
+    (tolerancia 0,02). No cambia ningun estado ni suma."""
+    retencion_pct = datos.get("retencion_pct") or 0
+    retencion_cuota = datos.get("retencion_cuota") or 0
+    if not retencion_pct and not retencion_cuota:
+        return True
+    suma_base = sum((l.get("base") or 0) for l in (datos.get("lineas_iva") or []))
+    esperado = suma_base * retencion_pct / 100
+    return abs(esperado - retencion_cuota) <= 0.02
+
+
+MOTIVO_ERROR_GENERICO = (
+    "No s'ha pogut generar la fitxa — l'arxiu és present però no hi ha extracció. "
+    "Cal revisar l'escaneig o tornar-ho a intentar."
+)
+
+
+def detectar_errores(rutas_presentes, carpeta_extraidas):
+    """Igual que en sumar.py: archivos presentes sin ficha extraida --
+    unica senal disponible, porque extraer_todas.py no persiste el
+    motivo de un fallo de extraccion."""
+    extraidos = set()
+    if os.path.isdir(carpeta_extraidas):
+        extraidos = {
+            os.path.splitext(f)[0] for f in os.listdir(carpeta_extraidas) if f.lower().endswith(".json")
+        }
+    return [r for r in rutas_presentes if os.path.splitext(os.path.basename(r))[0] not in extraidos]
+
+
+def avisos_verificacion(facturas):
+    """Igual que en sumar.py: NIF sin letra valida o retencion que no
+    cuadra. No cambia ningun estado ni suma."""
+    avisos = []
+    for nombre, datos in facturas:
+        for campo, etiqueta in [("nif_proveedor", "proveïdor"), ("nif_receptor", "receptor")]:
+            valor = datos.get(campo)
+            if validar_nif(valor) is False:
+                avisos.append((nombre, datos, f"NIF no supera la validació de la lletra ({etiqueta}: {valor})"))
+        if not verificar_retencion(datos):
+            avisos.append((nombre, datos, "la retenció calculada no quadra amb la retenció indicada"))
+    return avisos
 
 
 def leer_clientes():
@@ -175,10 +263,12 @@ def avisos_consistencia(facturas):
 
 
 def sumar_bloque(facturas):
-    """Igual que en sumar.py: total de las OK, y aparte la lista de
-    las que hay que revisar (las REVISAR no entran en el total)."""
+    """Igual que en sumar.py: total y cuota por tipo de IVA de las OK,
+    y aparte la lista de las que hay que revisar (las REVISAR no
+    entran en ningun total)."""
+    sumas = {tipo: {"cuota": 0.0} for tipo in TIPOS_IVA}
+    sumas["otros"] = {"cuota": 0.0}
     total_ok = 0.0
-    cuota_ok = 0.0
     revisar = []
     for nombre, datos in facturas:
         if datos.get("estado") != "OK":
@@ -186,8 +276,10 @@ def sumar_bloque(facturas):
             continue
         total_ok += datos.get("total") or 0
         for linea in datos.get("lineas_iva") or []:
-            cuota_ok += linea.get("cuota") or 0
-    return total_ok, cuota_ok, revisar
+            tipo = linea.get("tipo_iva")
+            clave = tipo if tipo in TIPOS_IVA else "otros"
+            sumas[clave]["cuota"] += linea.get("cuota") or 0
+    return total_ok, sumas, revisar
 
 
 def ruta_relativa_html(ruta_original, carpeta_cliente):
@@ -244,11 +336,23 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
 
     clase_estado = "revisar" if estado == "REVISAR" else "ok"
 
+    es_abonament = (datos.get("total") or 0) < 0
+    abonament_html = '<span class="etiqueta-abonament">ABONAMENT</span>' if es_abonament else ""
+
+    tiene_avisos = (
+        validar_nif(datos.get("nif_proveedor")) is False
+        or validar_nif(datos.get("nif_receptor")) is False
+        or not verificar_retencion(datos)
+    )
+    avisos_html = '<span class="etiqueta-verificacio">⚠ verificació</span>' if tiene_avisos else ""
+
     return f"""
     <div class="tarjeta {clase_estado}">
       <div class="tarjeta-izq">
         <span class="etiqueta-tipo etiqueta-{tipo_bloque.lower()}">{tipo_bloque}</span>
         <span class="etiqueta-estado">{esc(estado)}</span>
+        {abonament_html}
+        {avisos_html}
         <h3>{esc(datos.get("proveedor"))}</h3>
         <p>NIF: {esc(datos.get("nif_proveedor"))} · Factura: {esc(datos.get("num_factura"))} · Data: {esc(datos.get("fecha_factura"))}</p>
         <ul class="lineas-iva">{lineas_html}</ul>
@@ -266,7 +370,7 @@ TIPO_BLOQUE_SINGULAR = {"DESPESES": "DESPESA", "INGRESSOS": "INGRÉS"}
 
 
 def seccion_flujo(titulo, facturas, carpeta_original, carpeta_cliente):
-    total_ok, cuota_ok, revisar = sumar_bloque(facturas)
+    total_ok, sumas, revisar = sumar_bloque(facturas)
     tipo_bloque = TIPO_BLOQUE_SINGULAR[titulo]
     tarjetas = "".join(
         tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_cliente)
@@ -277,26 +381,55 @@ def seccion_flujo(titulo, facturas, carpeta_original, carpeta_cliente):
     <details>
       <summary>{esc(resumen)}</summary>
       {tarjetas if tarjetas else "<p>Sense factures.</p>"}
-    </details>""", total_ok, cuota_ok
+    </details>""", total_ok, sumas
 
 
-def seccion_trimestre(trimestre, datos_t, carpeta_cliente, origen_gastos, origen_ingressos):
-    html_gastos, total_g, cuota_g = seccion_flujo("DESPESES", datos_t["gastos"], origen_gastos, carpeta_cliente)
-    html_ingresos, total_i, cuota_i = seccion_flujo("INGRESSOS", datos_t["ingresos"], origen_ingressos, carpeta_cliente)
-    n_total = len(datos_t["gastos"]) + len(datos_t["ingresos"])
-    resumen = f"{trimestre} — {n_total} factures ({total_g:.2f} € despeses, {total_i:.2f} € ingressos)"
+def tabla_resultat_trimestre(sumas_g, sumas_i):
+    """RESULTAT DEL TRIMESTRE, protagonista al inicio -- misma Sigma
+    cuota por tipo de IVA que sumar_bloque ya calcula, no se recalcula
+    nada nuevo. No es una liquidacion oficial, solo un resultat de
+    treball."""
+    tipos_a_escribir = list(TIPOS_IVA)
+    if sumas_g["otros"]["cuota"] or sumas_i["otros"]["cuota"]:
+        tipos_a_escribir.append("otros")
 
-    resultat = cuota_i - cuota_g
+    filas = ""
+    cuota_g_total = 0.0
+    cuota_i_total = 0.0
+    for tipo in tipos_a_escribir:
+        cg = sumas_g[tipo]["cuota"]
+        ci = sumas_i[tipo]["cuota"]
+        etiqueta_tipo = "ALTRES" if tipo == "otros" else tipo
+        filas += f'<tr><td>{esc(etiqueta_tipo)}</td><td class="num">{cg:.2f}</td><td class="num">{ci:.2f}</td></tr>'
+        cuota_g_total += cg
+        cuota_i_total += ci
+
+    resultat = cuota_i_total - cuota_g_total
     if resultat > 0:
         etiqueta = " (a ingressar)"
     elif resultat < 0:
         etiqueta = " (a compensar)"
     else:
         etiqueta = ""
-    resultat_html = (
-        f'<p class="resultat-iva"><strong>RESULTAT IVA (repercutit − suportat): {resultat:.2f} €{etiqueta}</strong><br>'
-        f'<span class="nota">resultat de treball, no liquidació oficial</span></p>'
-    )
+
+    return f"""
+    <table class="resultat-trimestre">
+      <thead><tr><th>Tipus IVA</th><th>Quota despeses</th><th>Quota ingressos</th></tr></thead>
+      <tbody>{filas}</tbody>
+    </table>
+    <p class="resultat-iva"><strong>RESULTAT IVA (repercutit − suportat): {resultat:.2f} €{etiqueta}</strong><br>
+    <span class="nota">IVA cobrat menys IVA pagat; positiu = a ingressar, negatiu = a compensar
+    (resultat de treball, no liquidació oficial)</span></p>
+    """
+
+
+def seccion_trimestre(trimestre, datos_t, carpeta_cliente, origen_gastos, origen_ingressos):
+    html_gastos, total_g, sumas_g = seccion_flujo("DESPESES", datos_t["gastos"], origen_gastos, carpeta_cliente)
+    html_ingresos, total_i, sumas_i = seccion_flujo("INGRESSOS", datos_t["ingresos"], origen_ingressos, carpeta_cliente)
+    n_total = len(datos_t["gastos"]) + len(datos_t["ingresos"])
+    resumen = f"{trimestre} — {n_total} factures ({total_g:.2f} € despeses, {total_i:.2f} € ingressos)"
+
+    resultat_html = tabla_resultat_trimestre(sumas_g, sumas_i)
 
     return f"""
     <details>
@@ -343,7 +476,7 @@ def panel_conciliacio_flux(nombre_flux, presentes, extraidas, ok, pendents):
     </div>"""
 
 
-def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_ingressos):
+def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_gastos, origen_ingressos):
     # a) Documents apartats
     carpeta_albarans = f"{carpeta_cliente}/apartados/albarans"
     nombres_albaran = []
@@ -403,6 +536,42 @@ def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_ingressos):
             f'<th>Tipus d\'IVA</th><th>Fitxers afectats</th></tr></thead><tbody>{filas}</tbody></table>'
         )
 
+    # d) Errors -- archivos presentes sin ficha extraida (no tienen fecha, no van en ningun trimestre)
+    errores_gastos = detectar_errores(listar_archivos_rebudes(origen_gastos), f"{carpeta_cliente}/rebudes/extraidas")
+    errores_ingresos = detectar_errores(
+        [f for f in [os.path.join(origen_ingressos, n) for n in os.listdir(origen_ingressos)] if f.lower().endswith(EXTENSIONES_ORIGINAL)]
+        if os.path.isdir(origen_ingressos) else [],
+        f"{carpeta_cliente}/apartados/ingressos_extraidas",
+    )
+    filas_error = [("DESPESA", r) for r in errores_gastos] + [("INGRÉS", r) for r in errores_ingresos]
+    if not filas_error:
+        html_errores = "<p>Sense errors.</p>"
+    else:
+        filas = ""
+        for flujo, ruta in filas_error:
+            href = ruta_relativa_html(ruta, carpeta_cliente)
+            filas += f"""<tr><td>[{esc(flujo)}] <a href="{href}" target="_blank">{esc(os.path.basename(ruta))}</a></td>
+                <td>{esc(MOTIVO_ERROR_GENERICO)}</td></tr>"""
+        html_errores = f'<table class="errors"><thead><tr><th>Fitxer</th><th>Motiu</th></tr></thead><tbody>{filas}</tbody></table>'
+
+    # e) Avisos de verificacio -- letra de NIF y cuadre de retencion, no cambian estado
+    filas_verificacion = (
+        [(origen_gastos, nombre, motivo) for nombre, _, motivo in avisos_verificacion(gastos)]
+        + [(origen_ingressos, nombre, motivo) for nombre, _, motivo in avisos_verificacion(ingresos)]
+    )
+    if not filas_verificacion:
+        html_verificacion = "<p>Sense avisos de verificació.</p>"
+    else:
+        filas = ""
+        for carpeta_origen, nombre, motivo in filas_verificacion:
+            ruta_original = encontrar_original(carpeta_origen, nombre)
+            if ruta_original:
+                enlace = f'<a href="{ruta_relativa_html(ruta_original, carpeta_cliente)}" target="_blank">{esc(nombre)}</a>'
+            else:
+                enlace = esc(nombre)
+            filas += f"<tr><td>{enlace}</td><td>{esc(motivo)}</td></tr>"
+        html_verificacion = f'<table class="verificacio"><thead><tr><th>Fitxer</th><th>Motiu</th></tr></thead><tbody>{filas}</tbody></table>'
+
     return f"""
     <h2>Avisos</h2>
     <h3>Documents apartats</h3>
@@ -411,6 +580,10 @@ def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_ingressos):
     {html_ruido}
     <h3>Avisos de consistència</h3>
     {html_consistencia}
+    <h3>Errors</h3>
+    {html_errores}
+    <h3>Avisos de verificació</h3>
+    {html_verificacion}
     """
 
 
@@ -450,8 +623,11 @@ p.resultat-iva .nota { font-size: 0.8rem; font-style: italic; color: #555; }
 .tarjeta-izq { flex: 1; }
 .tarjeta-der { flex: 1; display: flex; align-items: center; justify-content: center; }
 .tarjeta-der img { max-width: 100%; max-height: 500px; border-radius: 4px; }
-.etiqueta-tipo, .etiqueta-estado { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 4px;
-                 font-size: 0.8rem; font-weight: bold; background: #fff; margin-right: 0.3rem; }
+.etiqueta-tipo, .etiqueta-estado, .etiqueta-abonament, .etiqueta-verificacio {
+  display: inline-block; padding: 0.15rem 0.6rem; border-radius: 4px;
+  font-size: 0.8rem; font-weight: bold; background: #fff; margin-right: 0.3rem; }
+.etiqueta-abonament { background: #FBE5D6; color: #833C00; }
+.etiqueta-verificacio { background: #FFC7CE; color: #9C0006; }
 .lineas-iva { margin: 0.3rem 0; padding-left: 1.2rem; }
 .archivo { font-family: monospace; font-size: 0.8rem; color: #555; }
 .btn-abrir { display: inline-block; background: #0563C1; color: white; padding: 0.8rem 1.5rem;
@@ -462,6 +638,7 @@ table:not(.comparacion):not(.conciliacio) { border-collapse: collapse; width: 10
 table:not(.comparacion):not(.conciliacio) th, table:not(.comparacion):not(.conciliacio) td {
   border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
 table:not(.comparacion):not(.conciliacio) th { background: #D9E1F2; }
+table.errors tbody tr { background: #FFC7CE; }
 
 @media (prefers-color-scheme: dark) {
   body { background: #1a1a1a; color: #eee; }
@@ -471,6 +648,9 @@ table:not(.comparacion):not(.conciliacio) th { background: #D9E1F2; }
   .tarjeta.ok { background: #22331f; border-color: #3a5230; }
   .tarjeta.revisar { background: #3a2a1f; border-color: #5c4128; }
   .etiqueta-tipo, .etiqueta-estado { background: #333; }
+  .etiqueta-abonament { background: #4a3423; color: #f0c090; }
+  .etiqueta-verificacio { background: #4a2323; color: #f0a0a0; }
+  table.errors tbody tr { background: #4a2323; }
   .archivo { color: #aaa; }
   .conciliacio-flux { background: #262626; }
   p.resultat-iva { background: #223; }
@@ -570,7 +750,7 @@ for fila_cliente in leer_clientes():
         filas_comparacion.append((trimestre, "DESPESES", total_g))
         filas_comparacion.append((trimestre, "INGRESSOS", total_i))
 
-    html_avisos = seccion_avisos(carpeta_cliente, gastos, ingresos, origen_ingressos)
+    html_avisos = seccion_avisos(carpeta_cliente, gastos, ingresos, origen_gastos, origen_ingressos)
 
     html_final = f"""<!DOCTYPE html>
 <html lang="ca">
