@@ -31,6 +31,18 @@ que una targeta REVISAR compti com OK i mostri un distintiu; 'descartar'
 la treu de la llista normal i la porta a una seccio Descartats propia
 per trimestre. Sense decisions.csv, o buit, el comportament es identic
 al d'abans d'aquest pis.
+
+Piso 9.3: construir_enllac() unica per a tots els enllaços -- nomes
+generen <a> si l'arxiu existeix de veritat en disc (si no, text pla,
+mai un enllaç mort). encontrar_original tambe busca a "procesadas"
+(abans exclosa). verificar_enlaces() relegeix cada informe ja escrit i
+distingeix "trencat" (bug de codi) de "corrupte" (arxiu buit o truncat
+-- problema de dades/sincronitzacio, no de codi). El motiu d'un ERROR
+distingeix aquest cas del generic quan es detecta.
+
+Piso 9.4: boto prominent "Obrir l'Excel (còpia de treball)" a la
+capçalera de cada informe i a clientes/index.html, amb `download`.
+Nomes presentacio -- cap dada ni suma canvia.
 """
 
 import base64
@@ -38,8 +50,9 @@ import csv
 import html
 import json
 import os
+import re
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 TIPOS_IVA = [0, 4, 5, 10, 12, 21]
 EXTENSIONES_ORIGINAL = (".pdf", ".jpg", ".jpeg", ".png")
@@ -47,6 +60,10 @@ EXTENSIONES_IMAGEN = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "imag
 
 RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS = {"davinstal": "Emeses/davinstal"}
 SUBCARPETAS_RESERVADAS = {"extraidas", "validadas", "procesadas", "lotes_escaneados", "lotes_procesados"}
+# Piso 9.3: para buscar un ORIGINAL (no para detectar errores), "procesadas"
+# no se excluye -- ahi es donde un PDF ya tratado puede haberse movido
+# (regla 5, run idempotente), y sigue siendo su ubicacion legitima.
+SUBCARPETAS_NO_ORIGINALES = {"extraidas", "validadas", "lotes_escaneados", "lotes_procesados"}
 
 GENERADO_EL = datetime.now().strftime("%d/%m/%Y %H:%M")
 
@@ -129,6 +146,36 @@ MOTIVO_ERROR_GENERICO = (
     "Cal revisar l'escaneig o tornar-ho a intentar."
 )
 
+MOTIVO_ERROR_CORRUPTE = (
+    "L'arxiu original és present però buit o corromput — probablement un "
+    "problema de sincronització. Cal tornar-lo a sincronitzar o demanar-lo de nou."
+)
+
+
+def archivo_corrupto(ruta):
+    """True si la ruta existe pero esta vacia, o es un PDF sense trailer
+    %%EOF en l'ultim KB (truncat a mitges -- p. ex. per una sincronitzacio
+    d'iCloud interrompuda). No es una validacio generica de PDF: nomes
+    detecta el patro de truncament vist en dades reals (Piso 9.3)."""
+    if not os.path.exists(ruta):
+        return False
+    tamano = os.path.getsize(ruta)
+    if tamano == 0:
+        return True
+    if ruta.lower().endswith(".pdf"):
+        with open(ruta, "rb") as f:
+            f.seek(max(0, tamano - 1024))
+            cola = f.read()
+        if b"%%EOF" not in cola:
+            return True
+    return False
+
+
+def motivo_error(ruta):
+    """Motiu derivat -- no inventat -- per a un archiu ERROR: distingeix
+    corrupcio comprovable en disc del generic 'no hi ha extraccio'."""
+    return MOTIVO_ERROR_CORRUPTE if archivo_corrupto(ruta) else MOTIVO_ERROR_GENERICO
+
 
 def detectar_errores(rutas_presentes, carpeta_extraidas):
     """Igual que en sumar.py: archivos presentes sin ficha extraida --
@@ -202,7 +249,9 @@ def trimestre_de(fecha):
 def encontrar_original(carpeta_origen, nombre_json):
     """Igual que en sumar.py: busca directamente, y si no, en
     subcarpetas hermanas no reservadas (proveedores organizados en
-    subcarpetas, ej. davinstal)."""
+    subcarpetas, ej. davinstal). Piso 9.3: "procesadas" SI se busca aqui
+    (a diferencia de listar_archivos_rebudes) -- un original ya movido
+    ahi tras procesarse sigue siendo su ubicacion legitima."""
     base = os.path.splitext(nombre_json)[0]
     for ext in EXTENSIONES_ORIGINAL:
         ruta = os.path.join(carpeta_origen, base + ext)
@@ -211,7 +260,7 @@ def encontrar_original(carpeta_origen, nombre_json):
     if os.path.isdir(carpeta_origen):
         for nombre_sub in sorted(os.listdir(carpeta_origen)):
             ruta_sub = os.path.join(carpeta_origen, nombre_sub)
-            if not os.path.isdir(ruta_sub) or nombre_sub.lower() in SUBCARPETAS_RESERVADAS:
+            if not os.path.isdir(ruta_sub) or nombre_sub.lower() in SUBCARPETAS_NO_ORIGINALES:
                 continue
             for ext in EXTENSIONES_ORIGINAL:
                 ruta = os.path.join(ruta_sub, base + ext)
@@ -327,6 +376,47 @@ def esc(valor):
     return html.escape(str(valor)) if valor is not None else ""
 
 
+def construir_enllac(ruta_original, carpeta_cliente, texto, clase=""):
+    """Piso 9.3: unica funcio d'enllaç del informe -- la fan servir
+    totes les targetes i taules (OK, PENDENT, ERROR, DESCARTAT). Nomes
+    torna un <a> si l'arxiu existeix DE VERITAT en disc; si no, None
+    (el crider ja sap com mostrar el nom d'arxiu sense enllaç mort)."""
+    if not (ruta_original and os.path.exists(ruta_original)):
+        return None
+    href = ruta_relativa_html(ruta_original, carpeta_cliente)
+    clase_attr = f' class="{clase}"' if clase else ""
+    return f'<a{clase_attr} href="{href}" target="_blank">{esc(texto)}</a>'
+
+
+def verificar_enlaces(ruta_html, carpeta_cliente):
+    """Piso 9.3: relegeix el HTML ja escrit i comprova que cada href
+    apunta a un arxiu real. 'Trencat' (no existeix) es un bug de codi
+    i no hauria de passar mai -- 'corrupte' (existeix pero buit o
+    truncat) es un problema de dades/sincronitzacio que cap canvi de
+    codi pot arreglar, nomes informar."""
+    with open(ruta_html) as f:
+        contenido = f.read()
+    trencats = []
+    corruptes = []
+    verificados = 0
+    for href in re.findall(r'href="([^"]+)"', contenido):
+        if href.startswith(("http://", "https://", "mailto:")):
+            continue
+        verificados += 1
+        ruta = os.path.join(carpeta_cliente, unquote(href))
+        if not os.path.exists(ruta):
+            trencats.append(href)
+        elif archivo_corrupto(ruta):
+            corruptes.append(href)
+    print(
+        f"{os.path.basename(carpeta_cliente)} / informe: {verificados} enllaços verificats, "
+        f"{len(trencats)} trencats, {len(corruptes)} corruptes"
+    )
+    for href in trencats:
+        print(f"  TRENCAT: {href}")
+    return trencats, corruptes
+
+
 def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_cliente, decision=None):
     """Fitxa completa d'UNA factura, OK o REVISAR. Esquerra: tots els
     camps extrets. Dreta: imatge incrustada (jpg/png) o enllaç gran (pdf).
@@ -339,12 +429,10 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         with open(ruta_original, "rb") as f:
             b64 = base64.standard_b64encode(f.read()).decode("utf-8")
         lado_derecho = f'<img loading="lazy" src="data:{EXTENSIONES_IMAGEN[extension]};base64,{b64}" alt="original">'
-    elif ruta_original:
-        href = ruta_relativa_html(ruta_original, carpeta_cliente)
-        lado_derecho = f'<a class="btn-abrir" href="{href}" target="_blank">Obrir original ↗</a>'
     else:
-        print(f"AVISO: no se encontró el original de {nombre}")
-        lado_derecho = '<p class="sin-original">Original no trobat</p>'
+        lado_derecho = construir_enllac(ruta_original, carpeta_cliente, "Obrir original ↗", clase="btn-abrir") or (
+            '<p class="sin-original">Original no localitzat</p>'
+        )
 
     lineas_html = "".join(
         f"<li>Base {esc(l.get('base'))} € × {esc(l.get('tipo_iva'))}% = {esc(l.get('cuota'))} €</li>"
@@ -444,11 +532,7 @@ def seccion_descartats(descartados, carpeta_cliente):
     filas = ""
     for nombre, datos, tipo_bloque, carpeta_original, decision in descartados:
         ruta_original = encontrar_original(carpeta_original, nombre)
-        if ruta_original:
-            href = ruta_relativa_html(ruta_original, carpeta_cliente)
-            enlace = f'<a href="{href}" target="_blank">{esc(nombre)} ↗</a>'
-        else:
-            enlace = esc(nombre)
+        enlace = construir_enllac(ruta_original, carpeta_cliente, f"{nombre} ↗") or esc(nombre)
         nota = decision.get("nota") or ""
         qui = decision.get("qui") or ""
         data_decisio = decision.get("data") or ""
@@ -575,8 +659,7 @@ def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_gastos, origen_ingr
         html_apartats = "<p>Sense documents apartats.</p>"
     else:
         filas = "".join(
-            f"""<tr><td><a href="{ruta_relativa_html(os.path.join(carpeta_albarans, n), carpeta_cliente)}"
-                target="_blank">{esc(n)}</a></td>
+            f"""<tr><td>{construir_enllac(os.path.join(carpeta_albarans, n), carpeta_cliente, n) or esc(n)}</td>
                 <td>Albarà: no es comptabilitza — la factura posterior n'agrupa els albarans.
                 Verificar que aquesta factura ha arribat</td></tr>"""
             for n in nombres_albaran
@@ -599,10 +682,7 @@ def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_gastos, origen_ingr
         filas = ""
         for nombre_lote, doc in filas_ruido:
             ruta_lote = os.path.join(carpeta_cliente, "rebudes/lotes_procesados", nombre_lote)
-            if os.path.exists(ruta_lote):
-                lote_html = f'<a href="{ruta_relativa_html(ruta_lote, carpeta_cliente)}" target="_blank">{esc(nombre_lote)}</a>'
-            else:
-                lote_html = esc(nombre_lote)
+            lote_html = construir_enllac(ruta_lote, carpeta_cliente, nombre_lote) or esc(nombre_lote)
             filas += f"""<tr><td>{lote_html}</td><td>p{doc['pagina_inicio']}-{doc['pagina_fin']}</td>
                 <td>{esc(doc.get('emisor_pista'))}</td></tr>"""
         html_ruido = f'<table><thead><tr><th>Lot</th><th>Pàgines</th><th>Pista</th></tr></thead><tbody>{filas}</tbody></table>'
@@ -636,9 +716,9 @@ def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_gastos, origen_ingr
     else:
         filas = ""
         for flujo, ruta in filas_error:
-            href = ruta_relativa_html(ruta, carpeta_cliente)
-            filas += f"""<tr><td>[{esc(flujo)}] <a href="{href}" target="_blank">{esc(os.path.basename(ruta))}</a></td>
-                <td>{esc(MOTIVO_ERROR_GENERICO)}</td></tr>"""
+            enlace = construir_enllac(ruta, carpeta_cliente, os.path.basename(ruta)) or esc(os.path.basename(ruta))
+            filas += f"""<tr><td>[{esc(flujo)}] {enlace}</td>
+                <td>{esc(motivo_error(ruta))}</td></tr>"""
         html_errores = f'<table class="errors"><thead><tr><th>Fitxer</th><th>Motiu</th></tr></thead><tbody>{filas}</tbody></table>'
 
     # e) Avisos de verificacio -- letra de NIF y cuadre de retencion, no cambian estado
@@ -652,10 +732,7 @@ def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_gastos, origen_ingr
         filas = ""
         for carpeta_origen, nombre, motivo in filas_verificacion:
             ruta_original = encontrar_original(carpeta_origen, nombre)
-            if ruta_original:
-                enlace = f'<a href="{ruta_relativa_html(ruta_original, carpeta_cliente)}" target="_blank">{esc(nombre)}</a>'
-            else:
-                enlace = esc(nombre)
+            enlace = construir_enllac(ruta_original, carpeta_cliente, nombre) or esc(nombre)
             filas += f"<tr><td>{enlace}</td><td>{esc(motivo)}</td></tr>"
         html_verificacion = f'<table class="verificacio"><thead><tr><th>Fitxer</th><th>Motiu</th></tr></thead><tbody>{filas}</tbody></table>'
 
@@ -722,6 +799,8 @@ p.resultat-iva .nota { font-size: 0.8rem; font-style: italic; color: #555; }
 table.descartats tbody tr { background: #E7E6E6; }
 .btn-abrir { display: inline-block; background: #0563C1; color: white; padding: 0.8rem 1.5rem;
              border-radius: 6px; text-decoration: none; font-weight: bold; }
+.btn-excel { display: inline-block; background: #1D6F42; color: white; padding: 0.6rem 1.2rem;
+             border-radius: 6px; text-decoration: none; font-weight: bold; margin: 0.5rem 0; }
 .sin-original { color: #a33; font-style: italic; }
 
 table:not(.comparacion):not(.conciliacio) { border-collapse: collapse; width: 100%; margin: 0.6rem 0 1.5rem 0; font-size: 0.9rem; }
@@ -800,6 +879,13 @@ for fila_cliente in leer_clientes():
         1 for _, documentos in manifiestos_conciliacio for doc in documentos if doc.get("tipo") == "ruido"
     )
 
+    # Piso 9.4: boton prominente al Excel de trabajo del cliente, solo si existe
+    ruta_excel_cliente = f"{carpeta_cliente}/sumatorios_2026.xlsx"
+    boton_excel_html = (
+        '<a class="btn-excel" href="sumatorios_2026.xlsx" download>Obrir l\'Excel (còpia de treball)</a>'
+        if os.path.exists(ruta_excel_cliente) else ""
+    )
+
     panel_html = f"""
     <h2>Conciliació</h2>
     <div class="conciliacio">
@@ -867,6 +953,7 @@ for fila_cliente in leer_clientes():
 <body>
   <h1>{esc(fila_cliente["nombre"])}</h1>
   <p class="subtitulo">NIF {esc(fila_cliente["nif"])} · Generat el {GENERADO_EL}</p>
+  {boton_excel_html}
 
   {panel_html}
 
@@ -886,6 +973,7 @@ for fila_cliente in leer_clientes():
 
     print(f"{carpeta} / informe: {n_tarjetas} tarjetas")
     print(f"Escrito: {ruta_html}")
+    verificar_enlaces(ruta_html, carpeta_cliente)
 
     clientes_generados.append({
         "nombre": fila_cliente["nombre"],
@@ -903,7 +991,8 @@ for c in clientes_generados:
         f'<a href="{c["carpeta"]}/informe_2026.html">Informe</a>' if c["informe_existe"] else "no disponible"
     )
     enlace_excel = (
-        f'<a href="{c["carpeta"]}/sumatorios_2026.xlsx">Excel</a>' if c["excel_existe"] else "no disponible"
+        f'<a class="btn-excel" href="{c["carpeta"]}/sumatorios_2026.xlsx" download>Obrir l\'Excel (còpia de treball)</a>'
+        if c["excel_existe"] else "no disponible"
     )
     filas_index += f"""<tr><td>{esc(c["nombre"])}</td><td>{esc(c["nif"])}</td>
         <td>{enlace_informe}</td><td>{enlace_excel}</td></tr>"""
