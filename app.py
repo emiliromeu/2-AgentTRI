@@ -18,11 +18,19 @@ costat Python, en el seu lloc real; (3) la pantalla final nomes
 oferia un client -- ara ensenya tots (ejecutar.py els processa tots
 de cop). De pas: totes les rutes s'ancoren a la carpeta del propi
 app.py (RAIZ_PROYECTO), no al directori des d'on es llanci streamlit.
+
+Piso 10.3: "Arxivar client" -- filosofia A3, mai destruir. Nomes
+shutil.move (mai shutil.rmtree) a arxivats/<carpeta>_<data_hora>/,
+amb recompte real llegit de disc i confirmacio escrivint el nom
+exacte. Treu la fila de clientes.csv i deixa rastre a
+arxivats/registre_arxivat.csv -- recuperable a ma en qualsevol
+moment.
 """
 
 import csv
 import io
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -108,15 +116,93 @@ def leer_clientes():
         return list(csv.DictReader(f))
 
 
-def anadir_cliente(nif, nombre, carpeta):
-    filas = leer_clientes()
-    filas.append({"nif": nif, "nombre": nombre, "carpeta": carpeta})
+def escribir_clientes(filas):
+    """Reescriu clientes.csv sencer -- l'usen anadir_cliente (afegir
+    una fila) i arxivar_cliente (Piso 10.3, treure'n una)."""
     with open(RUTA_CLIENTES_CSV, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CAMPOS_CLIENTES_CSV)
         writer.writeheader()
         writer.writerows(filas)
+
+
+def anadir_cliente(nif, nombre, carpeta):
+    filas = leer_clientes()
+    filas.append({"nif": nif, "nombre": nombre, "carpeta": carpeta})
+    escribir_clientes(filas)
     os.makedirs(ruta_proyecto("clientes", carpeta, "rebudes", "entrada"), exist_ok=True)
     os.makedirs(ruta_proyecto("clientes", carpeta, "apartados", "ingressos"), exist_ok=True)
+
+
+def contar_archivos_cliente(carpeta):
+    """Piso 10.3: recompte real de disc per al panel de confirmacio --
+    nomes comptar per extensio, cap interpretacio de contingut (igual
+    d'"embolcall" que guardar_archivo())."""
+    base = ruta_proyecto("clientes", carpeta)
+    originals = 0
+    fitxes = 0
+    for _, _, archivos in os.walk(base):
+        for nombre_archivo in archivos:
+            extension = os.path.splitext(nombre_archivo)[1].lower()
+            if extension in EXTENSIONES_HEIC or extension in (".pdf", ".jpg", ".jpeg", ".png"):
+                originals += 1
+            elif extension == ".json":
+                fitxes += 1
+    informes = sum(
+        os.path.exists(os.path.join(base, nombre_archivo))
+        for nombre_archivo in ("informe_2026.html", "sumatorios_2026.xlsx")
+    )
+    return {"originals": originals, "fitxes": fitxes, "informes": informes}
+
+
+def asegurar_gitignore_arxivats():
+    """Piso 10.3: 'arxivats/' no s'ha de versionar (son dades fiscals
+    reals, mateix criteri que clientes/). S'afegeix nomes si encara
+    no hi es -- sense duplicar ni trencar el fitxer existent."""
+    ruta_gitignore = ruta_proyecto(".gitignore")
+    lineas = []
+    if os.path.exists(ruta_gitignore):
+        with open(ruta_gitignore) as f:
+            lineas = f.read().splitlines()
+    if "arxivats/" not in lineas:
+        with open(ruta_gitignore, "a") as f:
+            f.write("arxivats/\n")
+
+
+def arxivar_cliente(fila):
+    """Piso 10.3: filosofia A3 -- mai shutil.rmtree, nomes shutil.move.
+    Mou clientes/<carpeta>/ sencera a arxivats/<carpeta>_<data_hora>/,
+    treu la fila de clientes.csv, i deixa rastre a
+    arxivats/registre_arxivat.csv. Res s'esborra mai."""
+    carpeta = fila["carpeta"]
+    origen = ruta_proyecto("clientes", carpeta)
+    marca = datetime.now().strftime("%Y%m%d_%H%M%S")
+    carpeta_arxivats = ruta_proyecto("arxivats")
+    destino = os.path.join(carpeta_arxivats, f"{carpeta}_{marca}")
+
+    if os.path.exists(destino):
+        raise RuntimeError(f"La carpeta destí '{destino}' ja existeix -- aturat, no s'ha mogut res.")
+
+    os.makedirs(carpeta_arxivats, exist_ok=True)
+    asegurar_gitignore_arxivats()
+
+    n_archivos = sum(len(archivos) for _, _, archivos in os.walk(origen))
+    shutil.move(origen, destino)
+
+    filas_restantes = [f for f in leer_clientes() if f["carpeta"] != carpeta]
+    escribir_clientes(filas_restantes)
+
+    ruta_registro = os.path.join(carpeta_arxivats, "registre_arxivat.csv")
+    escribir_cabecera = not os.path.exists(ruta_registro)
+    with open(ruta_registro, "a", newline="") as f:
+        writer = csv.writer(f)
+        if escribir_cabecera:
+            writer.writerow(["fecha", "cliente", "nif", "carpeta_origen", "carpeta_destino", "n_archivos"])
+        writer.writerow([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            fila["nombre"], fila["nif"], origen, destino, n_archivos,
+        ])
+
+    return destino, n_archivos
 
 
 def ruta_destino_factures(carpeta, destino):
@@ -190,6 +276,34 @@ def tarjeta_cliente(fila, prefijo, lineas_log=None):
         if lineas_log is not None:
             with st.expander("Registre d'aquest client"):
                 st.code("\n".join(lineas_log) if lineas_log else "Sense línies per a aquest client.")
+
+        # Piso 10.3: opcio discreta -- el boto disparador d'un popover
+        # ja es secundari/gris per defecte, no cal cap "boto vermell".
+        with st.popover("🗄️ Arxivar client"):
+            conteo = contar_archivos_cliente(carpeta)
+            st.markdown(f"**{fila['nombre']}** · NIF {fila['nif']} · carpeta `{carpeta}`")
+            st.write(
+                f"{conteo['originals']} documents originals, {conteo['fitxes']} fitxes, "
+                f"{conteo['informes']} informes."
+            )
+            st.caption(
+                "Res s'esborra -- es mou sencer a `arxivats/`, recuperable manualment."
+            )
+            confirmacion = st.text_input(
+                f"Escriu \"{fila['nombre']}\" per confirmar", key=f"{prefijo}_arxivar_nom_{carpeta}"
+            )
+            if st.button(
+                "Arxivar definitivament",
+                key=f"{prefijo}_arxivar_boto_{carpeta}",
+                disabled=confirmacion != fila["nombre"],
+            ):
+                try:
+                    destino, n_archivos = arxivar_cliente(fila)
+                except RuntimeError as e:
+                    st.error(str(e))
+                else:
+                    st.success(f"Client arxivat a `{destino}`. Recuperable manualment.")
+                    st.rerun()
 
 
 st.set_page_config(page_title="Agent TRIMESTRE", layout="wide")
