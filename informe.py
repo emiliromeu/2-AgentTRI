@@ -43,6 +43,10 @@ distingeix aquest cas del generic quan es detecta.
 Piso 9.4: boto prominent "Obrir l'Excel (còpia de treball)" a la
 capçalera de cada informe i a clientes/index.html, amb `download`.
 Nomes presentacio -- cap dada ni suma canvia.
+
+Piso 10.5: logo d'Olivella incrustat en base64 (mateix patro que ja
+fa servir tarjeta_factura per als jpg/png) a la capçalera de cada
+informe i de l'index. Nomes presentacio.
 """
 
 import base64
@@ -66,6 +70,16 @@ SUBCARPETAS_RESERVADAS = {"extraidas", "validadas", "procesadas", "lotes_escanea
 SUBCARPETAS_NO_ORIGINALES = {"extraidas", "validadas", "lotes_escaneados", "lotes_procesados"}
 
 GENERADO_EL = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+# Piso 10.5: logo incrustado en base64 (mismo patro que ya fa servir
+# tarjeta_factura per als jpg/png dels originals) -- aixi es veu igual
+# es obri l'informe des d'on es obri, sense dependre de la distancia
+# relativa fins a assets/.
+LOGO_HTML = ""
+if os.path.exists("assets/logo_olivella.png"):
+    with open("assets/logo_olivella.png", "rb") as f:
+        _logo_b64 = base64.standard_b64encode(f.read()).decode("utf-8")
+    LOGO_HTML = f'<img src="data:image/png;base64,{_logo_b64}" alt="Olivella" class="logo-capcalera">'
 
 # Igual que en sumar.py: traduccion de los motivos de validar.py por
 # sustitucion de las palabras fijas (validar.py no se toca).
@@ -754,6 +768,8 @@ def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_gastos, origen_ingr
 ESTILO = """
 body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 1100px;
        margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; line-height: 1.5; }
+.capcalera { display: flex; align-items: center; gap: 0.8rem; }
+.logo-capcalera { height: 40px; width: auto; }
 h1 { margin-bottom: 0.2rem; }
 .subtitulo { color: #555; margin-top: 0; }
 h2 { border-bottom: 2px solid #D9E1F2; padding-bottom: 0.3rem; margin-top: 2.5rem; }
@@ -951,7 +967,10 @@ for fila_cliente in leer_clientes():
 <style>{ESTILO}</style>
 </head>
 <body>
-  <h1>{esc(fila_cliente["nombre"])}</h1>
+  <div class="capcalera">
+    {LOGO_HTML}
+    <h1>{esc(fila_cliente["nombre"])}</h1>
+  </div>
   <p class="subtitulo">NIF {esc(fila_cliente["nif"])} · Generat el {GENERADO_EL}</p>
   {boton_excel_html}
 
@@ -1005,7 +1024,10 @@ index_html = f"""<!DOCTYPE html>
 <style>{ESTILO}</style>
 </head>
 <body>
-  <h1>Clients</h1>
+  <div class="capcalera">
+    {LOGO_HTML}
+    <h1>Clients</h1>
+  </div>
   <p class="subtitulo">Generat el {GENERADO_EL}</p>
   <table>
     <thead><tr><th>Client</th><th>NIF</th><th>Informe</th><th>Excel</th></tr></thead>

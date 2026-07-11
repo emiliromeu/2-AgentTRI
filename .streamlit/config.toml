@@ -1,0 +1,12 @@
+# Piso 10.5: tema nativo con la identitat d'Olivella. Colors extrets
+# per Python/PIL de assets/logo_olivella.png (mitjana de pixels
+# opacs, no a ull) -- vegeu el pla del Piso 10.5 per la metodologia.
+[theme]
+primaryColor = "#1659B4"
+backgroundColor = "#FDFDFD"
+secondaryBackgroundColor = "#F5F5F7"
+textColor = "#2E2D2E"
+font = "sans serif"
+greenColor = "#C8E314"
+baseRadius = "8px"
+buttonRadius = "8px"

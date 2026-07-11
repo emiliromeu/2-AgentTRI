@@ -25,6 +25,12 @@ amb recompte real llegit de disc i confirmacio escrivint el nom
 exacte. Treu la fila de clientes.csv i deixa rastre a
 arxivats/registre_arxivat.csv -- recuperable a ma en qualsevol
 moment.
+
+Piso 10.5: identitat visual Olivella. Colors del tema (config.toml)
+extrets amb PIL del logo real, no a ull. st.logo natiu + un unic
+bloc CSS_A3 nomes per allo que config.toml no cobreix (l'stack de
+tipografia -apple-system exacte i la subtil ombra de les targetes).
+Cap logica canvia -- nomes presentacio.
 """
 
 import csv
@@ -279,7 +285,7 @@ def tarjeta_cliente(fila, prefijo, lineas_log=None):
 
         # Piso 10.3: opcio discreta -- el boto disparador d'un popover
         # ja es secundari/gris per defecte, no cal cap "boto vermell".
-        with st.popover("🗄️ Arxivar client"):
+        with st.popover("Arxivar client"):
             conteo = contar_archivos_cliente(carpeta)
             st.markdown(f"**{fila['nombre']}** · NIF {fila['nif']} · carpeta `{carpeta}`")
             st.write(
@@ -306,7 +312,34 @@ def tarjeta_cliente(fila, prefijo, lineas_log=None):
                     st.rerun()
 
 
-st.set_page_config(page_title="Agent TRIMESTRE", layout="wide")
+# Piso 10.5: unic bloc CSS -- nomes per allo que config.toml no cobreix
+# (l'stack de tipografia exacte demanat i la subtil ombra de les
+# targetes). Colors/radi/etc ja viuen a .streamlit/config.toml.
+CSS_A3 = """
+<style>
+html, body, [class*="css"] {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+[data-testid="stVerticalBlockBorderWrapper"] {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    border-radius: 12px;
+}
+[data-testid="stVerticalBlock"] > [data-testid="stVerticalBlockBorderWrapper"] {
+    margin-bottom: 0.5rem;
+}
+h1, h2, h3 {
+    letter-spacing: -0.01em;
+}
+</style>
+"""
+
+st.set_page_config(
+    page_title="Agent TRIMESTRE — Gestoria Olivella",
+    page_icon=ruta_proyecto("assets", "olivella.ico"),
+    layout="wide",
+)
+st.logo(ruta_proyecto("assets", "logo_olivella.png"))
+st.markdown(CSS_A3, unsafe_allow_html=True)
 
 if "log_proces" not in st.session_state:
     st.session_state["log_proces"] = None
@@ -325,7 +358,7 @@ if vista == "Clients":
         for fila in clientes:
             tarjeta_cliente(fila, "clients")
 
-    with st.expander("➕ Nou client"):
+    with st.expander("Nou client"):
         # Piso 10.2: FORA de st.form -- els widgets dins d'un form no
         # reexecuten l'script en cada tecla, i la carpeta derivada
         # nomes pot ser una vista previa en viu si aquest bloc si ho fa.
@@ -348,7 +381,7 @@ if vista == "Clients":
             "El NIF no quadra la lletra de control -- continuar igualment", key="nou_continuar"
         )
 
-        if st.button("Crear client", key="nou_crear"):
+        if st.button("Crear client", key="nou_crear", type="primary"):
             carpetas_existentes = {f["carpeta"] for f in leer_clientes()}
             if not nombre or not nif:
                 st.error("Falten camps: nom i NIF són obligatoris.")
@@ -385,7 +418,7 @@ elif vista == "Afegir factures":
             accept_multiple_files=True,
         )
 
-        if st.button("Desar arxius", disabled=not archivos):
+        if st.button("Desar arxius", disabled=not archivos, type="primary"):
             carpeta_destino = ruta_destino_factures(carpeta, destino)
             nombres_finales = [guardar_archivo(a, carpeta_destino) for a in archivos]
             st.success(f"S'han desat {len(nombres_finales)} arxius a `{carpeta_destino}`:")
@@ -400,7 +433,7 @@ elif vista == "Processar":
     if not clientes:
         st.info("Encara no hi ha cap client donat d'alta -- res per processar.")
     else:
-        if st.button("Processar"):
+        if st.button("Processar", type="primary"):
             placeholder = st.empty()
             buffer = ""
             proceso = subprocess.Popen(
