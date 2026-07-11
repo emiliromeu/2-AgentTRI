@@ -31,10 +31,20 @@ extrets amb PIL del logo real, no a ull. st.logo natiu + un unic
 bloc CSS_A3 nomes per allo que config.toml no cobreix (l'stack de
 tipografia -apple-system exacte i la subtil ombra de les targetes).
 Cap logica canvia -- nomes presentacio.
+
+Piso 11A: vista "Revisió" -- la primera pantalla que ESCRIU
+decisions.csv (abans nomes ho llegien sumar.py/informe.py, Piso 9.2).
+Aprovar/Descartar sobre CADA fitxa (OK o REVISAR -- simetria: es pot
+descartar un OK amb nota, sumar_bloque ja ho suporta des del Piso 9.2
+sense cap canvi). Errors accionables: "Retirar" mou (mai esborra) a
+clientes/<carpeta>/errors_retirats/, fora de rebudes/apartados perque
+extraer_todas.py no el torni a veure. Boto RECALCULAR encadena nomes
+sumar.py + informe.py (sense API). La fabrica no es toca.
 """
 
 import csv
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -312,6 +322,357 @@ def tarjeta_cliente(fila, prefijo, lineas_log=None):
                     st.rerun()
 
 
+# =======================================================================
+# Piso 11A: vista "Revisio" -- duplicado de solo-lectura de informe.py
+# (ninguna maquina es importable, misma convencion desde el piso 2) mas
+# las primeras funciones que ESCRIBEN decisions.csv (hasta ahora solo lo
+# leian sumar.py/informe.py).
+# =======================================================================
+
+EXTENSIONES_ORIGINAL = (".pdf", ".jpg", ".jpeg", ".png")
+EXTENSIONES_IMAGEN = (".jpg", ".jpeg", ".png")
+SUBCARPETAS_RESERVADAS = {"extraidas", "validadas", "procesadas", "lotes_escaneados", "lotes_procesados"}
+SUBCARPETAS_NO_ORIGINALES = {"extraidas", "validadas", "lotes_escaneados", "lotes_procesados"}
+CAMPOS_DECISIONS_CSV = ["archivo", "accion", "nota", "qui", "data"]
+
+# Igual que en sumar.py/informe.py: traduccion de los motivos de
+# validar.py por sustitucion de palabras fijas (validar.py no se toca).
+TRADUCCIONES_MOTIVO = [
+    ("campo obligatorio vacío:", "camp obligatori buit:"),
+    ("línea", "línia"),
+    ("de IVA con campo vacío", "d'IVA amb camp buit"),
+    ("pero cuota indica", "però la quota indica"),
+    ("total no cuadra: bases+cuotas=", "el total no quadra: bases+quotes="),
+    (", total indica ", ", el total indica "),
+    ("nif_receptor no coincide: esperado", "el nif_receptor no coincideix: s'esperava"),
+    (", encontrado ", ", s'ha trobat "),
+    ("factura duplicada: mismo proveedor+num_factura que", "factura duplicada: mateix proveïdor+núm_factura que"),
+    ("retención con cuota > 0: el llibre no tiene columna para representarla",
+     "retenció amb quota > 0: el llibre no té columna per representar-la"),
+    ("el cliente no aparece ni como emisor ni como receptor",
+     "el client no apareix ni com a emissor ni com a receptor"),
+]
+
+
+def traducir_motivo(motivo):
+    for es, ca in TRADUCCIONES_MOTIVO:
+        motivo = motivo.replace(es, ca)
+    return motivo
+
+
+def verificar_retencion(datos):
+    """Igual que en informe.py/sumar.py: True si no hay retencion o si
+    cuadra (tolerancia 0,02). No cambia ningun estado ni suma."""
+    retencion_pct = datos.get("retencion_pct") or 0
+    retencion_cuota = datos.get("retencion_cuota") or 0
+    if not retencion_pct and not retencion_cuota:
+        return True
+    suma_base = sum((l.get("base") or 0) for l in (datos.get("lineas_iva") or []))
+    esperado = suma_base * retencion_pct / 100
+    return abs(esperado - retencion_cuota) <= 0.02
+
+
+def avisos_verificacion_ficha(datos):
+    """Igual criterio que avisos_verificacion() de informe.py, pero para
+    UNA ficha (aqui interesa mostrarlo en su propia tarjeta, no listarlo
+    aparte para todo un cliente)."""
+    avisos = []
+    for campo, etiqueta in [("nif_proveedor", "proveïdor"), ("nif_receptor", "receptor")]:
+        valor = datos.get(campo)
+        if validar_nif(valor) is False:
+            avisos.append(f"NIF no supera la validació de la lletra ({etiqueta}: {valor})")
+    if not verificar_retencion(datos):
+        avisos.append("la retenció calculada no quadra amb la retenció indicada")
+    return avisos
+
+
+MOTIVO_ERROR_GENERICO = (
+    "No s'ha pogut generar la fitxa — l'arxiu és present però no hi ha extracció. "
+    "Cal revisar l'escaneig o tornar-ho a intentar."
+)
+MOTIVO_ERROR_CORRUPTE = (
+    "L'arxiu original és present però buit o corromput — probablement un "
+    "problema de sincronització. Cal tornar-lo a sincronitzar o demanar-lo de nou."
+)
+
+
+def archivo_corrupto(ruta):
+    """Igual que en informe.py (Piso 9.3): True si la ruta existe pero
+    esta vacia, o es un PDF sense trailer %%EOF en l'ultim KB."""
+    if not os.path.exists(ruta):
+        return False
+    tamano = os.path.getsize(ruta)
+    if tamano == 0:
+        return True
+    if ruta.lower().endswith(".pdf"):
+        with open(ruta, "rb") as f:
+            f.seek(max(0, tamano - 1024))
+            cola = f.read()
+        if b"%%EOF" not in cola:
+            return True
+    return False
+
+
+def motivo_error(ruta):
+    return MOTIVO_ERROR_CORRUPTE if archivo_corrupto(ruta) else MOTIVO_ERROR_GENERICO
+
+
+def cargar_validadas(carpeta):
+    facturas = []
+    if not os.path.isdir(carpeta):
+        return facturas
+    for nombre in sorted(os.listdir(carpeta)):
+        if not nombre.lower().endswith(".json"):
+            continue
+        with open(os.path.join(carpeta, nombre)) as f:
+            facturas.append((nombre, json.load(f)))
+    return facturas
+
+
+def cargar_decisiones(carpeta_cliente):
+    """Igual que en sumar.py/informe.py: lee decisions.csv si existe.
+    Sin archivo, o vacio, devuelve {}."""
+    ruta = os.path.join(carpeta_cliente, "decisions.csv")
+    decisiones = {}
+    if not os.path.exists(ruta):
+        return decisiones
+    with open(ruta) as f:
+        for fila in csv.DictReader(f):
+            archivo = fila.get("archivo")
+            if archivo:
+                decisiones[archivo] = fila
+    return decisiones
+
+
+def encontrar_original(carpeta_origen, nombre_json):
+    """Igual que en informe.py/sumar.py: busca directamente, y si no, en
+    subcarpetas hermanas no reservadas. "procesadas" SI se busca (un
+    original ya movido ahi tras procesarse sigue siendo su ubicacion
+    legitima)."""
+    base = os.path.splitext(nombre_json)[0]
+    for ext in EXTENSIONES_ORIGINAL:
+        ruta = os.path.join(carpeta_origen, base + ext)
+        if os.path.exists(ruta):
+            return ruta
+    if os.path.isdir(carpeta_origen):
+        for nombre_sub in sorted(os.listdir(carpeta_origen)):
+            ruta_sub = os.path.join(carpeta_origen, nombre_sub)
+            if not os.path.isdir(ruta_sub) or nombre_sub.lower() in SUBCARPETAS_NO_ORIGINALES:
+                continue
+            for ext in EXTENSIONES_ORIGINAL:
+                ruta = os.path.join(ruta_sub, base + ext)
+                if os.path.exists(ruta):
+                    return ruta
+    return None
+
+
+def listar_archivos_rebudes(carpeta_rebudes):
+    """Igual que en informe.py/extraer_todas.py: entrada/ y cualquier
+    subcarpeta hermana no reservada (proveedores por subcarpeta)."""
+    rutas = []
+    if not os.path.isdir(carpeta_rebudes):
+        return rutas
+    for nombre in sorted(os.listdir(carpeta_rebudes)):
+        ruta = os.path.join(carpeta_rebudes, nombre)
+        if not os.path.isdir(ruta) or nombre.lower() in SUBCARPETAS_RESERVADAS:
+            continue
+        for nombre_archivo in sorted(os.listdir(ruta)):
+            if nombre_archivo.lower().endswith(EXTENSIONES_ORIGINAL):
+                rutas.append(os.path.join(ruta, nombre_archivo))
+    return rutas
+
+
+def detectar_errores(rutas_presentes, carpeta_extraidas):
+    """Igual que en informe.py/sumar.py: archivos presentes sin ficha
+    extraida -- unica senal disponible."""
+    extraidos = set()
+    if os.path.isdir(carpeta_extraidas):
+        extraidos = {
+            os.path.splitext(f)[0] for f in os.listdir(carpeta_extraidas) if f.lower().endswith(".json")
+        }
+    return [r for r in rutas_presentes if os.path.splitext(os.path.basename(r))[0] not in extraidos]
+
+
+def escribir_decision(carpeta_cliente, archivo, accion, nota, qui):
+    """Piso 11A: primera funcion que ESCRIBE decisions.csv -- hasta
+    ahora sumar.py/informe.py solo lo leian (Piso 9.2, rellenado a mano
+    por Emili). Si ya habia una decision para este archivo, la
+    sustituye -- no se acumulan filas contradictorias del mismo archivo."""
+    ruta = os.path.join(carpeta_cliente, "decisions.csv")
+    filas = []
+    if os.path.exists(ruta):
+        with open(ruta) as f:
+            filas = list(csv.DictReader(f))
+    filas = [f for f in filas if f.get("archivo") != archivo]
+    filas.append({
+        "archivo": archivo,
+        "accion": accion,
+        "nota": nota,
+        "qui": qui,
+        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    with open(ruta, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CAMPOS_DECISIONS_CSV)
+        writer.writeheader()
+        writer.writerows(filas)
+
+
+def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui):
+    """Piso 11A: filosofia A3 igual que arxivar_cliente (Piso 10.3) --
+    nunca shutil.rmtree, solo shutil.move. Vive fuera de rebudes/ y
+    apartados/ a proposito: asi extraer_todas.py (que si escanea esas
+    carpetas) nunca vuelve a ver el archivo retirado."""
+    carpeta_retirats = os.path.join(carpeta_cliente, "errors_retirats")
+    os.makedirs(carpeta_retirats, exist_ok=True)
+    nombre_base, extension = os.path.splitext(os.path.basename(ruta_archivo))
+    nombre_final = nombre_base + extension
+    destino = os.path.join(carpeta_retirats, nombre_final)
+    contador = 2
+    while os.path.exists(destino):
+        nombre_final = f"{nombre_base}_{contador}{extension}"
+        destino = os.path.join(carpeta_retirats, nombre_final)
+        contador += 1
+
+    shutil.move(ruta_archivo, destino)
+
+    ruta_registro = os.path.join(carpeta_retirats, "registre.csv")
+    escribir_cabecera = not os.path.exists(ruta_registro)
+    with open(ruta_registro, "a", newline="") as f:
+        writer = csv.writer(f)
+        if escribir_cabecera:
+            writer.writerow(["arxiu", "motiu", "qui", "data"])
+        writer.writerow([nombre_final, motivo, qui, datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+    return destino
+
+
+def contar_decisiones_sin_recalcular(carpeta_cliente, decisiones):
+    """Compara la fecha de cada decision (formato propio, parseable --
+    la escribe escribir_decision) contra el mtime de informe_2026.html.
+    Sin informe todavia, cuentan todas. Fechas no parseables (alguien
+    las escribio a mano en otro formato) no cuentan -- no rompen nada."""
+    ruta_informe = os.path.join(carpeta_cliente, "informe_2026.html")
+    if not os.path.exists(ruta_informe):
+        return len(decisiones)
+    mtime_informe = os.path.getmtime(ruta_informe)
+    contador = 0
+    for fila in decisiones.values():
+        try:
+            marca = datetime.strptime(fila.get("data", ""), "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        if marca > mtime_informe:
+            contador += 1
+    return contador
+
+
+def estado_revision_cliente(carpeta):
+    """Recoge todo lo que necesita la vista Revisio para un cliente:
+    fichas (rebudes+ingressos), decisiones, y errores -- todo leido de
+    disco en cada rerun, nada cacheado en session_state."""
+    carpeta_cliente = ruta_proyecto("clientes", carpeta)
+    origen_gastos = os.path.join(carpeta_cliente, "rebudes")
+    origen_ingressos_rel = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
+    origen_ingressos = os.path.join(carpeta_cliente, *origen_ingressos_rel.split("/"))
+
+    gastos = cargar_validadas(os.path.join(carpeta_cliente, "rebudes", "validadas"))
+    ingresos = cargar_validadas(os.path.join(carpeta_cliente, "apartados", "ingressos_validadas"))
+    todas = (
+        [(n, d, "rebudes", origen_gastos) for n, d in gastos]
+        + [(n, d, "ingressos", origen_ingressos) for n, d in ingresos]
+    )
+
+    decisiones = cargar_decisiones(carpeta_cliente)
+
+    errores_gastos = detectar_errores(
+        listar_archivos_rebudes(origen_gastos), os.path.join(carpeta_cliente, "rebudes", "extraidas")
+    )
+    archivos_ingressos_presentes = (
+        [os.path.join(origen_ingressos, n) for n in os.listdir(origen_ingressos)
+         if n.lower().endswith(EXTENSIONES_ORIGINAL)]
+        if os.path.isdir(origen_ingressos) else []
+    )
+    errores_ingresos = detectar_errores(
+        archivos_ingressos_presentes, os.path.join(carpeta_cliente, "apartados", "ingressos_extraidas")
+    )
+
+    pendents = [
+        (n, d, flujo, origen) for n, d, flujo, origen in todas
+        if d.get("estado") == "REVISAR" and n not in decisiones
+    ]
+    oks = [(n, d, flujo, origen) for n, d, flujo, origen in todas if d.get("estado") == "OK"]
+
+    return {
+        "carpeta_cliente": carpeta_cliente,
+        "todas": todas,
+        "pendents": pendents,
+        "oks": oks,
+        "decisiones": decisiones,
+        "errores": [("rebudes", r) for r in errores_gastos] + [("ingressos", r) for r in errores_ingresos],
+    }
+
+
+def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
+    """Piso 11A: tarjeta de UNA ficha (PENDENT u OK) con las mismas dos
+    acciones (Aprovar/Descartar) -- simetria del punto 3: se puede
+    descartar un OK con nota igual que se aprova un REVISAR."""
+    ruta_original = encontrar_original(origen, nombre)
+    extension = os.path.splitext(ruta_original)[1].lower() if ruta_original else None
+
+    with st.container(border=True):
+        col_izq, col_der = st.columns([2, 1])
+        with col_izq:
+            st.markdown(f"**{datos.get('proveedor')}**")
+            st.caption(
+                f"NIF {datos.get('nif_proveedor')} · Factura {datos.get('num_factura')} · "
+                f"{datos.get('fecha_factura')} · estat {datos.get('estado')}"
+            )
+            for linea in datos.get("lineas_iva") or []:
+                st.write(f"Base {linea.get('base')} € × {linea.get('tipo_iva')}% = {linea.get('cuota')} €")
+            st.write(f"Total: {datos.get('total')} €")
+            if datos.get("retencion_cuota"):
+                st.write(f"Retenció: {datos.get('retencion_pct')}% = {datos.get('retencion_cuota')} €")
+            motivos = [traducir_motivo(m) for m in (datos.get("motivos") or [])]
+            if motivos:
+                st.warning("\n".join(f"- {m}" for m in motivos))
+            for aviso in avisos_verificacion_ficha(datos):
+                st.caption(f"⚠ {aviso}")
+            if datos.get("observaciones"):
+                st.caption(f"Observacions: {datos['observaciones']}")
+            st.caption(nombre)
+        with col_der:
+            if ruta_original and extension in EXTENSIONES_IMAGEN:
+                st.image(ruta_original)
+            else:
+                boton_obrir("Obrir original", ruta_original or "", key=f"{prefijo}_original_{nombre}")
+
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            if st.button("Aprovar", key=f"{prefijo}_aprovar_{nombre}", disabled=not qui, type="primary"):
+                escribir_decision(carpeta_cliente, nombre, "aprovar", "", qui)
+                st.rerun()
+        with col_b:
+            nota = st.text_input("Nota (obligatòria per descartar)", key=f"{prefijo}_nota_{nombre}")
+            if st.button("Descartar", key=f"{prefijo}_descartar_{nombre}", disabled=not qui or not nota):
+                escribir_decision(carpeta_cliente, nombre, "descartar", nota, qui)
+                st.rerun()
+
+
+def tarjeta_error(flujo, ruta, carpeta_cliente, qui, prefijo):
+    """Piso 11A: tarjeta por ERROR (archivo presente sin ficha) --
+    motivo derivado, enlace, instruccion, y accion RETIRAR (mai
+    esborrar, mou a errors_retirats/)."""
+    nombre = os.path.basename(ruta)
+    with st.container(border=True):
+        st.markdown(f"**[{flujo.upper()}] {nombre}**")
+        st.warning(motivo_error(ruta))
+        boton_obrir("Obrir arxiu", ruta, key=f"{prefijo}_error_original_{nombre}")
+        st.caption("Torna a pujar l'arxiu bo des d'\"Afegir factures\".")
+        if st.button("Retirar arxiu il·legible", key=f"{prefijo}_retirar_{nombre}", disabled=not qui):
+            destino = retirar_error(carpeta_cliente, ruta, motivo_error(ruta), qui)
+            st.success(f"Arxiu retirat a `{destino}`.")
+            st.rerun()
+
+
 # Piso 10.5: unic bloc CSS -- nomes per allo que config.toml no cobreix
 # (l'stack de tipografia exacte demanat i la subtil ombra de les
 # targetes). Colors/radi/etc ja viuen a .streamlit/config.toml.
@@ -345,7 +706,7 @@ if "log_proces" not in st.session_state:
     st.session_state["log_proces"] = None
 
 st.title("Agent TRIMESTRE")
-vista = st.sidebar.radio("Navegació", ["Clients", "Afegir factures", "Processar"])
+vista = st.sidebar.radio("Navegació", ["Clients", "Afegir factures", "Processar", "Revisió"])
 
 # ----------------------------------------------------------------------
 if vista == "Clients":
@@ -467,3 +828,91 @@ elif vista == "Processar":
                 ]
                 tarjeta_cliente(fila, "final", lineas_log=linias_cliente)
             boton_obrir("Obrir portada", ruta_proyecto("clientes", "index.html"), key="final_portada")
+
+# ----------------------------------------------------------------------
+elif vista == "Revisió":
+    st.header("Revisió")
+    clientes = leer_clientes()
+
+    if not clientes:
+        st.info("Encara no hi ha cap client donat d'alta.")
+    else:
+        opciones = {f"{f['nombre']} ({f['carpeta']})": f for f in clientes}
+        eleccion = st.selectbox("Client", list(opciones.keys()), key="revisio_client")
+        fila_cliente = opciones[eleccion]
+        carpeta = fila_cliente["carpeta"]
+
+        qui = st.text_input("Qui revisa? (una vegada per sessió)", key="qui_revisa")
+        if not qui:
+            st.info("Escriu qui revisa per activar Aprovar / Descartar / Retirar.")
+
+        estado = estado_revision_cliente(carpeta)
+        n_pendents = len(estado["pendents"])
+        n_errores = len(estado["errores"])
+        n_decidits = len(estado["decisiones"])
+        n_sin_recalcular = contar_decisiones_sin_recalcular(estado["carpeta_cliente"], estado["decisiones"])
+
+        st.subheader(
+            f"{n_pendents} pendents per decidir · {n_errores} errors per resoldre · "
+            f"{n_decidits} decidits · {n_sin_recalcular} decisions noves sense recalcular"
+        )
+
+        if st.button(
+            "RECALCULAR", key="revisio_recalcular",
+            type="primary" if n_sin_recalcular > 0 else "secondary",
+        ):
+            placeholder = st.empty()
+            buffer = ""
+            for maquina in ["sumar.py", "informe.py"]:
+                proceso = subprocess.Popen(
+                    [sys.executable, maquina],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1, cwd=RAIZ_PROYECTO,
+                )
+                for linea in proceso.stdout:
+                    buffer += linea
+                    placeholder.code(buffer)
+                proceso.wait()
+            st.success("Recalculat.")
+            st.rerun()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            boton_obrir("Obrir informe", os.path.join(estado["carpeta_cliente"], "informe_2026.html"), key="revisio_informe")
+        with col2:
+            boton_obrir("Obrir Excel", os.path.join(estado["carpeta_cliente"], "sumatorios_2026.xlsx"), key="revisio_excel")
+
+        st.markdown(f"### Pendents sense decisió ({n_pendents})")
+        if not estado["pendents"]:
+            st.caption("Cap pendent sense decidir.")
+        for nombre, datos, flujo, origen in estado["pendents"]:
+            tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "pendent")
+
+        oks_no_decididas = [
+            (n, d, flujo, origen) for n, d, flujo, origen in estado["oks"]
+            if n not in estado["decisiones"]
+        ]
+        with st.expander(f"Fitxes OK — revisar-les també ({len(oks_no_decididas)})"):
+            oks_ordenadas = sorted(
+                oks_no_decididas, key=lambda t: 0 if avisos_verificacion_ficha(t[1]) else 1
+            )
+            if not oks_ordenadas:
+                st.caption("Sense fitxes OK.")
+            for nombre, datos, flujo, origen in oks_ordenadas:
+                tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "ok")
+
+        st.markdown(f"### Errors ({n_errores})")
+        if not estado["errores"]:
+            st.caption("Cap error per resoldre.")
+        for flujo, ruta in estado["errores"]:
+            tarjeta_error(flujo, ruta, estado["carpeta_cliente"], qui, "error")
+
+        with st.expander(f"Ja decidits ({n_decidits})"):
+            if not estado["decisiones"]:
+                st.caption("Cap decisió encara.")
+            for archivo, decision in estado["decisiones"].items():
+                nota = f" — _{decision.get('nota')}_" if decision.get("nota") else ""
+                st.write(
+                    f"**{archivo}** — {decision.get('accion')} per {decision.get('qui')} "
+                    f"el {decision.get('data')}{nota}"
+                )
