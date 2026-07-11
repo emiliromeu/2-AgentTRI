@@ -49,6 +49,11 @@ distingue "trencat" (bug de codigo, no deberia pasar nunca) de
 "corrupte" (archivo presente pero vacio o truncado -- problema de
 datos/sincronizacion, ningun cambio de codigo lo arregla). El motivo
 de un ERROR distingue este caso del generico cuando se detecta.
+
+Piso 11B: distintivo "CORREGIT" en DETALLE (mismo patron aditivo que
+ABONAMENT/⚠) -- si la ficha trae camps_corregits (escrito por
+validar.py, unica cirugia del piso), se anexa al texto del estado con
+el detalle antic->nou. Ninguna suma ni logica cambia aqui.
 """
 
 import csv
@@ -554,6 +559,14 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
             estado_mostrado += " (ABONAMENT)"
         if tiene_avisos:
             estado_mostrado += " ⚠"
+
+        # Piso 11B: distintiu "corregit" -- mismo patron aditivo que
+        # ABONAMENT/⚠. camps_corregits lo escribe validar.py (cirugia
+        # minima alli); aqui solo se muestra, ninguna suma cambia.
+        camps_corregits = datos.get("camps_corregits") or []
+        if camps_corregits:
+            detall = "; ".join(f"{c['camp']}: {c['antic']}→{c['nou']}" for c in camps_corregits)
+            estado_mostrado += f" | CORREGIT ({detall})"
 
         for linea in lineas:
             celda_nombre = ws.cell(row=fila, column=1, value=datos.get("fecha_factura"))

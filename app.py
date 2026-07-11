@@ -51,6 +51,13 @@ cap targeta fins que es confirma. Cada targeta te la nota+botons
 dins del seu propi st.form pel mateix motiu. Cap boto es desactiva
 ja mai: si falta la nota per descartar, el clic es processa sempre i
 respon amb un st.error visible -- fallada sorollosa, mai muda.
+
+Piso 11B: "Corregir camps" -- unica capa d'escriptura que toca la
+xarxa de validacio, i ho fa nomes a traves de validar.py (cirugia
+minima, documentada alli). Aqui nomes s'escriu correccions.csv (una
+fila per camp que de veritat canvia) -- mai s'edita cap JSON
+d'extraidas/. RECALCULAR ara encadena validar.py abans de sumar.py/
+informe.py perque la correccio torni a passar tot l'examen.
 """
 
 import csv
@@ -345,6 +352,12 @@ EXTENSIONES_IMAGEN = (".jpg", ".jpeg", ".png")
 SUBCARPETAS_RESERVADAS = {"extraidas", "validadas", "procesadas", "lotes_escaneados", "lotes_procesados"}
 SUBCARPETAS_NO_ORIGINALES = {"extraidas", "validadas", "lotes_escaneados", "lotes_procesados"}
 CAMPOS_DECISIONS_CSV = ["archivo", "accion", "nota", "qui", "data"]
+CAMPOS_CORRECCIONS_CSV = ["arxiu", "camp", "valor_antic", "valor_nou", "motiu", "qui", "data"]
+CAMPOS_CORREGIBLES_TOP = [
+    "proveedor", "nif_proveedor", "num_factura", "fecha_factura",
+    "receptor", "nif_receptor", "total", "retencion_pct",
+    "retencion_cuota", "exenta", "observaciones",
+]
 
 # Igual que en sumar.py/informe.py: traduccion de los motivos de
 # validar.py por sustitucion de palabras fijas (validar.py no se toca).
@@ -528,6 +541,23 @@ def escribir_decision(carpeta_cliente, archivo, accion, nota, qui):
         writer.writerows(filas)
 
 
+def escribir_correccion(carpeta_cliente, archivo, cambios, motiu, qui):
+    """Piso 11B: anexa una fila por cada campo que de verdad cambio a
+    correccions.csv. validar.py (cargar_correcciones/aplicar_correcciones)
+    las aplica en memoria antes de volver a validar -- nunca toca
+    extraidas/, y la ficha corregida vuelve a pasar por TODA la red sin
+    atajos (RECALCULAR ahora incluye validar.py primero)."""
+    ruta = os.path.join(carpeta_cliente, "correccions.csv")
+    escribir_cabecera = not os.path.exists(ruta)
+    data_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(ruta, "a", newline="") as f:
+        writer = csv.writer(f)
+        if escribir_cabecera:
+            writer.writerow(CAMPOS_CORRECCIONS_CSV)
+        for camp, valor_antic, valor_nou in cambios:
+            writer.writerow([archivo, camp, valor_antic, valor_nou, motiu, qui, data_actual])
+
+
 def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui):
     """Piso 11A: filosofia A3 igual que arxivar_cliente (Piso 10.3) --
     nunca shutil.rmtree, solo shutil.move. Vive fuera de rebudes/ y
@@ -660,6 +690,13 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
                 st.caption(f"⚠ {aviso}")
             if datos.get("observaciones"):
                 st.caption(f"Observacions: {datos['observaciones']}")
+            camps_corregits = datos.get("camps_corregits") or []
+            if camps_corregits:
+                detall = "; ".join(
+                    f"{c['camp']}: {c['antic']} → {c['nou']} ({c['qui']}, {c['data']})"
+                    for c in camps_corregits
+                )
+                st.success(f"Corregit — {detall}")
             st.caption(nombre)
         with col_der:
             if ruta_original and extension in EXTENSIONES_IMAGEN:
@@ -687,6 +724,73 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
             else:
                 escribir_decision(carpeta_cliente, nombre, "descartar", nota, qui)
                 st.rerun()
+
+        # Piso 11B: "Corregir camps" -- capa de correccio, mai edita
+        # extraidas/. Camps precarregats amb el valor ACTUAL; nomes es
+        # desa el que de veritat canvia. Dins d'un st.form pel mateix
+        # motiu que Aprovar/Descartar (Piso 11A-fix): sense form, un
+        # camp editat sense Tab no es aplicaria en clicar Guardar.
+        with st.popover("Corregir camps"):
+            st.caption(
+                "La fitxa corregida torna a passar tota la validació -- "
+                "corregir no aprova. Cal RECALCULAR després de desar."
+            )
+            with st.form(key=f"form_correccio_{prefijo}_{nombre}", border=False):
+                valors_nous = {}
+                for camp in CAMPOS_CORREGIBLES_TOP:
+                    valor_actual = datos.get(camp)
+                    valors_nous[camp] = st.text_input(
+                        camp,
+                        value="" if valor_actual is None else str(valor_actual),
+                        key=f"{prefijo}_correccio_{camp}_{nombre}",
+                    )
+                lineas_nuevas = []
+                for i, linea in enumerate(datos.get("lineas_iva") or []):
+                    st.caption(f"Línia {i}")
+                    col_t, col_b, col_c = st.columns(3)
+                    with col_t:
+                        t = st.text_input(
+                            f"tipo_iva[{i}]", value=str(linea.get("tipo_iva")),
+                            key=f"{prefijo}_correccio_tipo_{i}_{nombre}",
+                        )
+                    with col_b:
+                        b = st.text_input(
+                            f"base[{i}]", value=str(linea.get("base")),
+                            key=f"{prefijo}_correccio_base_{i}_{nombre}",
+                        )
+                    with col_c:
+                        c = st.text_input(
+                            f"cuota[{i}]", value=str(linea.get("cuota")),
+                            key=f"{prefijo}_correccio_cuota_{i}_{nombre}",
+                        )
+                    lineas_nuevas.append((i, t, b, c))
+                motiu_correccio = st.text_input("Motiu (obligatori)", key=f"{prefijo}_correccio_motiu_{nombre}")
+                click_guardar = st.form_submit_button("Guardar correccions")
+
+            if click_guardar:
+                cambios = []
+                for camp in CAMPOS_CORREGIBLES_TOP:
+                    valor_antic = datos.get(camp)
+                    valor_antic_str = "" if valor_antic is None else str(valor_antic)
+                    if valors_nous[camp] != valor_antic_str:
+                        cambios.append((camp, valor_antic_str, valors_nous[camp]))
+                for i, t, b, c in lineas_nuevas:
+                    linea_actual = (datos.get("lineas_iva") or [])[i]
+                    if t != str(linea_actual.get("tipo_iva")):
+                        cambios.append((f"lineas_iva[{i}].tipo_iva", str(linea_actual.get("tipo_iva")), t))
+                    if b != str(linea_actual.get("base")):
+                        cambios.append((f"lineas_iva[{i}].base", str(linea_actual.get("base")), b))
+                    if c != str(linea_actual.get("cuota")):
+                        cambios.append((f"lineas_iva[{i}].cuota", str(linea_actual.get("cuota")), c))
+
+                if not cambios:
+                    st.info("Cap canvi per desar.")
+                elif not motiu_correccio:
+                    st.error("Cal escriure un motiu per desar correccions.")
+                else:
+                    escribir_correccion(carpeta_cliente, nombre, cambios, motiu_correccio, qui)
+                    st.success(f"{len(cambios)} camp(s) corregit(s). Cal RECALCULAR perquè es reavaluïn.")
+                    st.rerun()
 
 
 def tarjeta_error(flujo, ruta, carpeta_cliente, qui, prefijo):
@@ -917,7 +1021,12 @@ elif vista == "Revisió":
         ):
             placeholder = st.empty()
             buffer = ""
-            for maquina in ["sumar.py", "informe.py"]:
+            # Piso 11B: validar.py entra en la cadena -- las correccions.csv
+            # solo se aplican en memoria dentro de validar.py, asi que hace
+            # falta volver a correrlo para que una correccio "torni a passar
+            # l'examen". Sigue sin llamadas a la API (validar.py es pura
+            # logica Python), igual de gratis que sumar.py/informe.py.
+            for maquina in ["validar.py", "sumar.py", "informe.py"]:
                 proceso = subprocess.Popen(
                     [sys.executable, maquina],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

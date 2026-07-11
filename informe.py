@@ -47,6 +47,11 @@ Nomes presentacio -- cap dada ni suma canvia.
 Piso 10.5: logo d'Olivella incrustat en base64 (mateix patro que ja
 fa servir tarjeta_factura per als jpg/png) a la capçalera de cada
 informe i de l'index. Nomes presentacio.
+
+Piso 11B: distintiu "Corregit" (mateix patro additiu que ABONAMENT o
+"aprovat manualment") -- si la fitxa te camps_corregits (escrit per
+validar.py, Piso 11B), es mostra el badge i el detall antic->nou. Cap
+suma ni logica canvia aqui, nomes presentacio del que ja ve calculat.
 """
 
 import base64
@@ -493,6 +498,19 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         if decision.get("nota"):
             nota_decisio_html = f"<p class=\"nota-decisio\"><strong>Nota:</strong> {esc(decision.get('nota'))}</p>"
 
+    # Piso 11B: distintiu "corregit" -- correccions.csv es aplica en
+    # memoria dins de validar.py (cirugia minima alli). Aqui nomes es
+    # mostra el que ja ve escrit a la fitxa, cap suma ni logica canvia.
+    camps_corregits = datos.get("camps_corregits") or []
+    corregit_html = '<span class="etiqueta-decisio corregit">✎ Corregit</span>' if camps_corregits else ""
+    corregit_detall_html = ""
+    if camps_corregits:
+        items = "".join(
+            f"<li>{esc(c['camp'])}: {esc(c['antic'])} → {esc(c['nou'])} ({esc(c['qui'])}, {esc(c['data'])})</li>"
+            for c in camps_corregits
+        )
+        corregit_detall_html = f"<p><strong>Correccions aplicades:</strong></p><ul>{items}</ul>"
+
     return f"""
     <div class="tarjeta {clase_estado}">
       <div class="tarjeta-izq">
@@ -501,6 +519,7 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         {abonament_html}
         {avisos_html}
         {decisio_html}
+        {corregit_html}
         <h3>{esc(datos.get("proveedor"))}</h3>
         <p>NIF: {esc(datos.get("nif_proveedor"))} · Factura: {esc(datos.get("num_factura"))} · Data: {esc(datos.get("fecha_factura"))}</p>
         <ul class="lineas-iva">{lineas_html}</ul>
@@ -510,6 +529,7 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         {motivos_html}
         {observaciones_html}
         {nota_decisio_html}
+        {corregit_detall_html}
       </div>
       <div class="tarjeta-der">{lado_derecho}</div>
     </div>"""
@@ -809,6 +829,7 @@ p.resultat-iva .nota { font-size: 0.8rem; font-style: italic; color: #555; }
 .etiqueta-abonament { background: #FBE5D6; color: #833C00; }
 .etiqueta-verificacio { background: #FFC7CE; color: #9C0006; }
 .etiqueta-decisio.aprovat { background: #E2EFDA; color: #375623; }
+.etiqueta-decisio.corregit { background: #D9E8F5; color: #0D3D6B; }
 .lineas-iva { margin: 0.3rem 0; padding-left: 1.2rem; }
 .archivo { font-family: monospace; font-size: 0.8rem; color: #555; }
 .nota-decisio { font-style: italic; }
@@ -836,6 +857,7 @@ table.errors tbody tr { background: #FFC7CE; }
   .etiqueta-abonament { background: #4a3423; color: #f0c090; }
   .etiqueta-verificacio { background: #4a2323; color: #f0a0a0; }
   .etiqueta-decisio.aprovat { background: #22331f; color: #b7d7a8; }
+  .etiqueta-decisio.corregit { background: #1a2e42; color: #a9cdf0; }
   table.errors tbody tr { background: #4a2323; }
   table.descartats tbody tr { background: #333; }
   .archivo { color: #aaa; }
