@@ -58,6 +58,14 @@ minima, documentada alli). Aqui nomes s'escriu correccions.csv (una
 fila per camp que de veritat canvia) -- mai s'edita cap JSON
 d'extraidas/. RECALCULAR ara encadena validar.py abans de sumar.py/
 informe.py perque la correccio torni a passar tot l'examen.
+
+Piso 12B: les targetes de Revisió passen a portar els mateixos colors
+que informe.py (verd .ok / taronja .revisar / vermell .error) via
+st.container(key=...) + CSS_A3 -- cap canvi de logica, nomes la key
+del container i tres regles CSS mes. Vista previa del PDF original:
+primera pagina renderitzada com a imatge amb PyMuPDF (fitz), mantenint
+"Obrir original" per accedir-hi sencer; si no es pot renderitzar, cau
+al comportament d'abans (nomes el boto) -- mai un error sense explicar.
 """
 
 import csv
@@ -69,6 +77,7 @@ import subprocess
 import sys
 from datetime import datetime
 
+import fitz
 import streamlit as st
 from PIL import Image
 from pillow_heif import register_heif_opener
@@ -271,6 +280,19 @@ def guardar_archivo(archivo_subido, carpeta_destino):
             f.write(archivo_subido.getvalue())
 
     return nombre_final
+
+
+def previsualizar_pdf(ruta_pdf):
+    """Piso 12B: primera pagina del PDF renderitzada com a imatge en
+    memoria (mai es desa a disc). Si el PDF no es pot obrir o
+    renderitzar (mateix esperit que archivo_corrupto de sumar.py/
+    informe.py), retorna None -- qui la crida cau llavors al boto
+    "Obrir original" sol, mai un error sense explicar."""
+    try:
+        with fitz.open(ruta_pdf) as doc:
+            return doc[0].get_pixmap(dpi=100).tobytes("png")
+    except Exception:
+        return None
 
 
 def boton_obrir(etiqueta, ruta_absoluta, key):
@@ -670,7 +692,13 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
     ruta_original = encontrar_original(origen, nombre)
     extension = os.path.splitext(ruta_original)[1].lower() if ruta_original else None
 
-    with st.container(border=True):
+    # Piso 12B: mateixos colors que informe.py (.tarjeta.ok/.tarjeta.revisar)
+    # -- la key del container es l'unica cosa que canvia, el CSS_A3 de sota
+    # la reconeix pel prefix. prefijo aqui nomes val "pendent" (REVISAR
+    # sense decisio) o "ok" (OK sense decisio) -- els ja decidits no criden
+    # aquesta funcio (van a l'expander "Ja decidits" en text pla).
+    clase_color = "revisar" if prefijo == "pendent" else "ok"
+    with st.container(border=True, key=f"tarjeta_{clase_color}_{prefijo}_{nombre}"):
         col_izq, col_der = st.columns([2, 1])
         with col_izq:
             st.markdown(f"**{datos.get('proveedor')}**")
@@ -702,6 +730,10 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
             if ruta_original and extension in EXTENSIONES_IMAGEN:
                 st.image(ruta_original)
             else:
+                if ruta_original and extension == ".pdf":
+                    imagen_pdf = previsualizar_pdf(ruta_original)
+                    if imagen_pdf:
+                        st.image(imagen_pdf)
                 boton_obrir("Obrir original", ruta_original or "", key=f"{prefijo}_original_{nombre}")
 
         with st.form(key=f"form_{prefijo}_{nombre}", border=False):
@@ -799,7 +831,7 @@ def tarjeta_error(flujo, ruta, carpeta_cliente, qui, prefijo):
     esborrar, mou a errors_retirats/). Piso 11A-fix: qui ya llega
     siempre relleno (puerta de entrada), no hace falta disabled=."""
     nombre = os.path.basename(ruta)
-    with st.container(border=True):
+    with st.container(border=True, key=f"tarjeta_error_{prefijo}_{nombre}"):
         st.markdown(f"**[{flujo.upper()}] {nombre}**")
         st.warning(motivo_error(ruta))
         boton_obrir("Obrir arxiu", ruta, key=f"{prefijo}_error_original_{nombre}")
@@ -827,6 +859,23 @@ html, body, [class*="css"] {
 }
 h1, h2, h3 {
     letter-spacing: -0.01em;
+}
+/* Piso 12B: mateixos colors que informe.py (.tarjeta.ok/.tarjeta.revisar)
+   a les targetes de Revisió -- en aquesta versió de Streamlit la vora,
+   el radi i el padding del container(border=True) viuen directament al
+   propi stVerticalBlock que porta la classe st-key-<key> (no hi ha cap
+   embolcall stVerticalBlockBorderWrapper com en versions anteriors). */
+[class*="st-key-tarjeta_revisar_"] {
+    background: #FCE4D6 !important;
+    border-color: #e8b48f !important;
+}
+[class*="st-key-tarjeta_ok_"] {
+    background: #E2EFDA !important;
+    border-color: #b7d7a8 !important;
+}
+[class*="st-key-tarjeta_error_"] {
+    background: #FFC7CE !important;
+    border-color: #e2929c !important;
 }
 </style>
 """
