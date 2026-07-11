@@ -40,6 +40,17 @@ sense cap canvi). Errors accionables: "Retirar" mou (mai esborra) a
 clientes/<carpeta>/errors_retirats/, fora de rebudes/apartados perque
 extraer_todas.py no el torni a veure. Boto RECALCULAR encadena nomes
 sumar.py + informe.py (sense API). La fabrica no es toca.
+
+Piso 11A-fix: reproduit en directe el bug que Emili patia -- un
+st.text_input solt nomes aplica el seu valor amb blur/Enter, mai
+tecla a tecla, aixi que Aprovar/Descartar/Retirar (tots amb
+disabled=not qui) es quedaven grisos encara que ja hagues escrit el
+seu nom. "Qui revisa?" ara es una porta bloquejant amb st.form (que
+si aplica el valor en polsar el seu boto, sense blur) -- no es veu
+cap targeta fins que es confirma. Cada targeta te la nota+botons
+dins del seu propi st.form pel mateix motiu. Cap boto es desactiva
+ja mai: si falta la nota per descartar, el clic es processa sempre i
+respon amb un st.error visible -- fallada sorollosa, mai muda.
 """
 
 import csv
@@ -614,7 +625,18 @@ def estado_revision_cliente(carpeta):
 def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
     """Piso 11A: tarjeta de UNA ficha (PENDENT u OK) con las mismas dos
     acciones (Aprovar/Descartar) -- simetria del punto 3: se puede
-    descartar un OK con nota igual que se aprova un REVISAR."""
+    descartar un OK con nota igual que se aprova un REVISAR.
+
+    Piso 11A-fix: nota+botones dentro de un st.form -- un form aplica
+    TODO lo tecleado en el momento de pulsar cualquiera de sus botones,
+    sin necesitar Tab/blur (eso era lo que dejaba Aprovar/Descartar
+    "sin responder" cuando Emili escribia y clicaba seguido). La nota
+    ahora sirve para las dos acciones: obligatoria para Descartar,
+    opcional para Aprovar (antes no habia ningun sitio para comentar
+    al aprobar). qui ya llega siempre relleno -- la puerta de entrada
+    a Revisio lo garantiza -- asi que los botones nunca se deshabilitan;
+    si falta la nota al descartar, el clic SIEMPRE se procesa y se
+    responde con un st.error visible, nunca en silencio."""
     ruta_original = encontrar_original(origen, nombre)
     extension = os.path.splitext(ruta_original)[1].lower() if ruta_original else None
 
@@ -645,14 +667,24 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
             else:
                 boton_obrir("Obrir original", ruta_original or "", key=f"{prefijo}_original_{nombre}")
 
-        col_a, col_b = st.columns([1, 2])
-        with col_a:
-            if st.button("Aprovar", key=f"{prefijo}_aprovar_{nombre}", disabled=not qui, type="primary"):
-                escribir_decision(carpeta_cliente, nombre, "aprovar", "", qui)
-                st.rerun()
-        with col_b:
-            nota = st.text_input("Nota (obligatòria per descartar)", key=f"{prefijo}_nota_{nombre}")
-            if st.button("Descartar", key=f"{prefijo}_descartar_{nombre}", disabled=not qui or not nota):
+        with st.form(key=f"form_{prefijo}_{nombre}", border=False):
+            nota = st.text_input(
+                "Nota (obligatòria per descartar; opcional per aprovar)",
+                key=f"{prefijo}_nota_{nombre}",
+            )
+            col_a, col_b = st.columns([1, 2])
+            with col_a:
+                click_aprovar = st.form_submit_button("Aprovar", type="primary")
+            with col_b:
+                click_descartar = st.form_submit_button("Descartar")
+
+        if click_aprovar:
+            escribir_decision(carpeta_cliente, nombre, "aprovar", nota, qui)
+            st.rerun()
+        if click_descartar:
+            if not nota:
+                st.error("Cal escriure una nota per descartar.")
+            else:
                 escribir_decision(carpeta_cliente, nombre, "descartar", nota, qui)
                 st.rerun()
 
@@ -660,14 +692,15 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
 def tarjeta_error(flujo, ruta, carpeta_cliente, qui, prefijo):
     """Piso 11A: tarjeta por ERROR (archivo presente sin ficha) --
     motivo derivado, enlace, instruccion, y accion RETIRAR (mai
-    esborrar, mou a errors_retirats/)."""
+    esborrar, mou a errors_retirats/). Piso 11A-fix: qui ya llega
+    siempre relleno (puerta de entrada), no hace falta disabled=."""
     nombre = os.path.basename(ruta)
     with st.container(border=True):
         st.markdown(f"**[{flujo.upper()}] {nombre}**")
         st.warning(motivo_error(ruta))
         boton_obrir("Obrir arxiu", ruta, key=f"{prefijo}_error_original_{nombre}")
         st.caption("Torna a pujar l'arxiu bo des d'\"Afegir factures\".")
-        if st.button("Retirar arxiu il·legible", key=f"{prefijo}_retirar_{nombre}", disabled=not qui):
+        if st.button("Retirar arxiu il·legible", key=f"{prefijo}_retirar_{nombre}"):
             destino = retirar_error(carpeta_cliente, ruta, motivo_error(ruta), qui)
             st.success(f"Arxiu retirat a `{destino}`.")
             st.rerun()
@@ -836,15 +869,36 @@ elif vista == "Revisió":
 
     if not clientes:
         st.info("Encara no hi ha cap client donat d'alta.")
+    elif not st.session_state.get("qui_revisa_confirmat"):
+        # Piso 11A-fix: puerta BLOQUEANTE -- dentro de un st.form el valor
+        # tecleado se aplica al pulsar el boton, sin necesitar Tab/blur
+        # (a diferencia de un st.text_input suelto, que es lo que hacia
+        # que Aprovar/Descartar/Retirar parecieran "no responder").
+        st.info("Cal indicar qui revisa abans de veure cap fitxa.")
+        with st.form("form_qui_revisa"):
+            nom_qui = st.text_input("Qui revisa? (una vegada per sessió)", key="qui_revisa_input")
+            entrar = st.form_submit_button("Entrar a revisar", type="primary")
+        if entrar:
+            if not nom_qui.strip():
+                st.error("Cal escriure un nom abans de continuar.")
+            else:
+                st.session_state["qui_revisa_confirmat"] = nom_qui.strip()
+                st.rerun()
+        st.stop()
     else:
+        qui = st.session_state["qui_revisa_confirmat"]
+        col_qui, col_canviar = st.columns([4, 1])
+        with col_qui:
+            st.caption(f"Revisant com: **{qui}**")
+        with col_canviar:
+            if st.button("Canviar qui revisa", key="qui_canviar"):
+                st.session_state["qui_revisa_confirmat"] = None
+                st.rerun()
+
         opciones = {f"{f['nombre']} ({f['carpeta']})": f for f in clientes}
         eleccion = st.selectbox("Client", list(opciones.keys()), key="revisio_client")
         fila_cliente = opciones[eleccion]
         carpeta = fila_cliente["carpeta"]
-
-        qui = st.text_input("Qui revisa? (una vegada per sessió)", key="qui_revisa")
-        if not qui:
-            st.info("Escriu qui revisa per activar Aprovar / Descartar / Retirar.")
 
         estado = estado_revision_cliente(carpeta)
         n_pendents = len(estado["pendents"])
