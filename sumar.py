@@ -54,11 +54,38 @@ Piso 11B: distintivo "CORREGIT" en DETALLE (mismo patron aditivo que
 ABONAMENT/⚠) -- si la ficha trae camps_corregits (escrito por
 validar.py, unica cirugia del piso), se anexa al texto del estado con
 el detalle antic->nou. Ninguna suma ni logica cambia aqui.
+
+Piso 12A: los totales (RESULTAT, TOTAL de bloque, Σ RETENCIONS) pasan
+de valores Python ya redondeados a formulas Excel =SUM() reales, para
+que Emili pueda ver -y en su caso retocar- de donde sale cada numero
+directamente en el libro. Para que esas formulas puedan apuntar a un
+rango contiguo, DETALL se reparte en dos bloques por flujo: "FACTURES
+QUE SUMEN" (las mismas que hoy cuentan en sumar_bloque, agrupadas por
+tipus d'IVA para que cada tipo ocupe un rango de filas seguido) y
+"PENDENTS -- NO SUMEN" (las REVISAR sin decision, en taronja, con el
+mismo detalle de linias, para poder auditar sin sumar). Las DESCARTADES
+ya no se repiten en DETALL -- tienen su propio bloc DESCARTATS con
+nota/qui/data. Nueva columna "Retenció" (una fila por factura, no por
+linia, para no duplicar la retencio si hay mas de un tipus d'IVA).
+Como RESULTAT/DESPESES/INGRESSOS se escriben ANTES que DETALL en la
+hoja pero sus formulas necesitan saber en que filas exactas cae cada
+tipo dentro de DETALL, cada hoja se escribe en tres pasadas: (1)
+etiquetas con las celdas numericas en blanco, recordando su posicion;
+(2) PENDENT DE REVISIO y DESCARTATS igual que siempre; (3) DETALL,
+anotando el rango de filas de cada tipo y del bloque entero mientras
+se escribe. Con esos rangos ya conocidos se rellenan las celdas en
+blanco del paso 1 con texto de formula (openpyxl nunca la calcula,
+solo Excel al abrir el archivo). Verificacion nueva: verificar_formulas
+reabre el Excel ya guardado, reparsa cada formula con una regex,
+confirma que el rango coincide exactamente con el anotado y recalcula
+en Python el mismo valor a partir de las celdas planas de DETALL,
+comparando al centimo contra lo que sumar_bloque ya calculo en memoria.
 """
 
 import csv
 import json
 import os
+import re
 from datetime import datetime
 
 from openpyxl import Workbook, load_workbook
@@ -354,6 +381,74 @@ def verificar_enlaces_excel(ruta_xlsx, carpeta_cliente):
     return trencats, corruptes
 
 
+PATRON_SUM = re.compile(r"^=SUM\(([A-Z]+)(\d+):([A-Z]+)(\d+)\)$")
+PATRON_RESTA_SUM = re.compile(r"^=SUM\(([A-Z]+)(\d+):([A-Z]+)(\d+)\)-SUM\(([A-Z]+)(\d+):([A-Z]+)(\d+)\)$")
+
+
+def _leer_rango(ws, columna, ini, fin):
+    total = 0.0
+    for f in range(ini, fin + 1):
+        valor = ws[f"{columna}{f}"].value
+        total += valor or 0
+    return total
+
+
+def verificar_formulas(ruta_xlsx, comprobaciones_por_hoja):
+    """Piso 12A: openpyxl no calcula formulas -- solo Excel, al abrir el
+    archivo. Por eso, tras guardar, se reabre el mismo Excel (load_workbook
+    devuelve el TEXTO de la formula, nunca su resultado) y por cada
+    formula escrita: (1) se reparsa su rango con una regex; (2) se
+    comprueba que coincide EXACTO con el rango anotado al escribir
+    DETALL (para detectar un futuro cambio que desalinee los bloques);
+    (3) se suman en Python los valores planos de esas celdas y se
+    compara contra el valor que sumar_bloque ya calculo en memoria
+    durante este mismo run, con tolerancia de centimo. Cualquier fallo
+    para el run con un error claro -- regla 4, nada en silencio."""
+    wb = load_workbook(ruta_xlsx)
+    total_verificadas = 0
+    for nombre_hoja, comprobaciones in comprobaciones_por_hoja.items():
+        ws = wb[nombre_hoja]
+        for comprobacion in comprobaciones:
+            coordenada = comprobacion[0]
+            formula = ws[coordenada].value
+
+            if comprobacion[1] == "resta":
+                _, _, (col_i, ini_i, fin_i), (col_g, ini_g, fin_g), valor_esperado = comprobacion
+                m = PATRON_RESTA_SUM.match(str(formula))
+                if not m:
+                    raise ValueError(f"{nombre_hoja}!{coordenada}: fórmula inesperada: {formula!r}")
+                col_p1, ini_p1, col_p1b, fin_p1, col_p2, ini_p2, col_p2b, fin_p2 = m.groups()
+                rango_parseado = (col_p1, int(ini_p1), col_p1b, int(fin_p1), col_p2, int(ini_p2), col_p2b, int(fin_p2))
+                rango_esperado = (col_i, ini_i, col_i, fin_i, col_g, ini_g, col_g, fin_g)
+                if rango_parseado != rango_esperado:
+                    raise ValueError(
+                        f"{nombre_hoja}!{coordenada}: rang de la fórmula ({rango_parseado}) "
+                        f"no coincideix amb l'anotat ({rango_esperado})"
+                    )
+                valor_real = _leer_rango(ws, col_i, ini_i, fin_i) - _leer_rango(ws, col_g, ini_g, fin_g)
+            else:
+                _, columna, ini, fin, valor_esperado = comprobacion
+                m = PATRON_SUM.match(str(formula))
+                if not m:
+                    raise ValueError(f"{nombre_hoja}!{coordenada}: fórmula inesperada: {formula!r}")
+                col_p1, ini_p, col_p2, fin_p = m.groups()
+                if (col_p1, int(ini_p), col_p2, int(fin_p)) != (columna, ini, columna, fin):
+                    raise ValueError(
+                        f"{nombre_hoja}!{coordenada}: rang de la fórmula ({col_p1}{ini_p}:{col_p2}{fin_p}) "
+                        f"no coincideix amb l'anotat ({columna}{ini}:{columna}{fin})"
+                    )
+                valor_real = _leer_rango(ws, columna, ini, fin)
+
+            if abs(valor_real - valor_esperado) > 0.01:
+                raise ValueError(
+                    f"{nombre_hoja}!{coordenada}: la fórmula suma {valor_real:.2f}, "
+                    f"s'esperava {valor_esperado:.2f}"
+                )
+            total_verificadas += 1
+
+    return total_verificadas
+
+
 def escribir_titulo(ws, nombre_cliente, nif_cliente):
     ws.cell(row=1, column=1, value=f"SUMATORIS {nombre_cliente}").font = FUENTE_TITULO
     ws.cell(row=2, column=1, value=f"NIF {nif_cliente}").font = FUENTE_SUBTITULO
@@ -402,7 +497,12 @@ def sumar_bloque(facturas, decisiones):
     return sumas, total_ok, retencion_ok, revisar, descartados
 
 
-def escribir_bloque(ws, fila, titulo, sumas, total_ok, con_retencion, retencion_ok):
+def escribir_bloque(ws, fila, titulo, sumas, con_retencion):
+    """Piso 12A: escribe solo la ESTRUCTURA (etiquetas, tipos de IVA
+    presentes) -- las celdas de Base/Quota/Total/Σ RETENCIONS quedan en
+    blanco, se rellenan mas tarde con formulas en escribir_formulas_bloque
+    una vez se conoce el rango de filas de DETALL. Devuelve (fila,
+    info) -- info trae la posicion de cada celda que hay que rellenar."""
     for col in range(1, 5):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
@@ -418,53 +518,106 @@ def escribir_bloque(ws, fila, titulo, sumas, total_ok, con_retencion, retencion_
     if sumas["otros"]["base"] or sumas["otros"]["cuota"]:
         tipos_a_escribir.append("otros")
 
-    suma_base = 0.0
-    suma_cuota = 0.0
+    filas_por_tipo = {}
     for tipo in tipos_a_escribir:
-        base = sumas[tipo]["base"]
-        cuota = sumas[tipo]["cuota"]
         etiqueta_tipo = "ALTRES" if tipo == "otros" else tipo
         ws.cell(row=fila, column=1, value=etiqueta_tipo)
-        celda_base = ws.cell(row=fila, column=2, value=round(base, 2))
-        celda_base.number_format = FORMATO_MONEDA
-        celda_cuota = ws.cell(row=fila, column=3, value=round(cuota, 2))
-        celda_cuota.number_format = FORMATO_MONEDA
-        suma_base += base
-        suma_cuota += cuota
+        ws.cell(row=fila, column=2).number_format = FORMATO_MONEDA
+        ws.cell(row=fila, column=3).number_format = FORMATO_MONEDA
+        filas_por_tipo[tipo] = fila
         fila += 1
 
     for col in range(1, 5):
         ws.cell(row=fila, column=col).border = BORDE_SUPERIOR
     ws.cell(row=fila, column=1, value="TOTAL").font = ESTILO_ENCABEZADO
-    celda = ws.cell(row=fila, column=2, value=round(suma_base, 2))
-    celda.font = ESTILO_ENCABEZADO
-    celda.number_format = FORMATO_MONEDA
-    celda = ws.cell(row=fila, column=3, value=round(suma_cuota, 2))
-    celda.font = ESTILO_ENCABEZADO
-    celda.number_format = FORMATO_MONEDA
-    celda = ws.cell(row=fila, column=4, value=round(total_ok, 2))
-    celda.font = ESTILO_ENCABEZADO
-    celda.number_format = FORMATO_MONEDA
+    for col in (2, 3, 4):
+        celda = ws.cell(row=fila, column=col)
+        celda.font = ESTILO_ENCABEZADO
+        celda.number_format = FORMATO_MONEDA
+    fila_total = fila
     fila += 1
 
+    fila_retencio = None
     if con_retencion:
         for col in range(1, 5):
             ws.cell(row=fila, column=col).border = BORDE_SUPERIOR
         ws.cell(row=fila, column=1, value="Σ RETENCIONS").font = ESTILO_ENCABEZADO
-        celda = ws.cell(row=fila, column=4, value=round(retencion_ok, 2))
+        celda = ws.cell(row=fila, column=4)
         celda.font = ESTILO_ENCABEZADO
         celda.number_format = FORMATO_MONEDA
+        fila_retencio = fila
         fila += 1
 
-    return fila + 1  # una fila en blanco antes del siguiente bloque
+    info = {"filas_por_tipo": filas_por_tipo, "fila_total": fila_total, "fila_retencio": fila_retencio}
+    return fila + 1, info  # una fila en blanco antes del siguiente bloque
 
 
-def escribir_resultat_trimestre(ws, fila, sumas_g, sumas_i):
-    """RESULTAT DEL TRIMESTRE, protagonista al inicio de la hoja --
-    Sigma cuota por tipo de IVA de despeses e ingressos (los mismos
-    diccionarios que sumar_bloque ya devuelve, no se recalcula nada
-    nuevo) y la linea RESULTAT = repercutit - suportat. No es una
-    liquidacion oficial, solo un resultat de treball."""
+def escribir_formulas_bloque(ws, info, rango_detalle, sumas, total_ok, retencion_ok):
+    """Piso 12A: rellena con formulas =SUM() las celdas que escribir_bloque
+    dejo en blanco, apuntando SOLO al rango de "FACTURES QUE SUMEN" de
+    DETALL (rango_detalle, devuelto por escribir_detalle). Si un tipo no
+    tiene ninguna linia que sume, se escribe 0 (no hay rango que sumar,
+    no tiene sentido una formula). Devuelve la lista de comprobaciones
+    para verificar_formulas: (celda, columna, fila_ini, fila_fin, valor_esperado)."""
+    comprobaciones = []
+
+    for tipo, fila_tipo in info["filas_por_tipo"].items():
+        rango = rango_detalle["tipos"].get(tipo)
+        celda_base = ws.cell(row=fila_tipo, column=2)
+        celda_cuota = ws.cell(row=fila_tipo, column=3)
+        if rango is None:
+            celda_base.value = 0
+            celda_cuota.value = 0
+            continue
+        ini, fin = rango
+        celda_base.value = f"=SUM({COLUMNA_BASE_DETALLE}{ini}:{COLUMNA_BASE_DETALLE}{fin})"
+        celda_cuota.value = f"=SUM({COLUMNA_QUOTA_DETALLE}{ini}:{COLUMNA_QUOTA_DETALLE}{fin})"
+        comprobaciones.append((celda_base.coordinate, COLUMNA_BASE_DETALLE, ini, fin, round(sumas[tipo]["base"], 2)))
+        comprobaciones.append((celda_cuota.coordinate, COLUMNA_QUOTA_DETALLE, ini, fin, round(sumas[tipo]["cuota"], 2)))
+
+    rango_bloque = rango_detalle["bloque"]
+    fila_total = info["fila_total"]
+    celda_total_base = ws.cell(row=fila_total, column=2)
+    celda_total_cuota = ws.cell(row=fila_total, column=3)
+    celda_total_total = ws.cell(row=fila_total, column=4)
+    if rango_bloque is None:
+        celda_total_base.value = 0
+        celda_total_cuota.value = 0
+        celda_total_total.value = 0
+    else:
+        ini, fin = rango_bloque
+        suma_base_esperada = round(sum(sumas[t]["base"] for t in sumas), 2)
+        suma_cuota_esperada = round(sum(sumas[t]["cuota"] for t in sumas), 2)
+        celda_total_base.value = f"=SUM({COLUMNA_BASE_DETALLE}{ini}:{COLUMNA_BASE_DETALLE}{fin})"
+        celda_total_cuota.value = f"=SUM({COLUMNA_QUOTA_DETALLE}{ini}:{COLUMNA_QUOTA_DETALLE}{fin})"
+        celda_total_total.value = f"=SUM({COLUMNA_TOTAL_DETALLE}{ini}:{COLUMNA_TOTAL_DETALLE}{fin})"
+        comprobaciones.append((celda_total_base.coordinate, COLUMNA_BASE_DETALLE, ini, fin, suma_base_esperada))
+        comprobaciones.append((celda_total_cuota.coordinate, COLUMNA_QUOTA_DETALLE, ini, fin, suma_cuota_esperada))
+        comprobaciones.append((celda_total_total.coordinate, COLUMNA_TOTAL_DETALLE, ini, fin, round(total_ok, 2)))
+
+    if info["fila_retencio"] is not None:
+        celda_retencio = ws.cell(row=info["fila_retencio"], column=4)
+        if rango_bloque is None:
+            celda_retencio.value = 0
+        else:
+            ini, fin = rango_bloque
+            celda_retencio.value = f"=SUM({COLUMNA_RETENCIO_DETALLE}{ini}:{COLUMNA_RETENCIO_DETALLE}{fin})"
+            comprobaciones.append((celda_retencio.coordinate, COLUMNA_RETENCIO_DETALLE, ini, fin, round(retencion_ok, 2)))
+
+    return comprobaciones
+
+
+def escribir_resultat_estructura(ws, fila, sumas_g, sumas_i):
+    """Piso 12A: RESULTAT DEL TRIMESTRE, protagonista al inicio de la
+    hoja -- escribe solo la ESTRUCTURA (etiquetas, tipos de IVA
+    presentes), dejando en blanco las celdas de Quota despeses/Quota
+    ingressos/RESULTAT IVA -- se rellenan en escribir_formulas_resultat
+    una vez se conoce el rango de filas de DETALL, con el MISMO =SUM()
+    que usan los bloques DESPESES/INGRESSOS (dos formulas
+    independientes sobre el mismo rango, no una referencia a la otra
+    celda -- asi cada formula del libro se puede verificar sola, sin
+    encadenar una formula que lee otra formula). No es una liquidacion
+    oficial, solo un resultat de treball."""
     for col in range(1, 4):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
@@ -480,28 +633,21 @@ def escribir_resultat_trimestre(ws, fila, sumas_g, sumas_i):
     if sumas_g["otros"]["cuota"] or sumas_i["otros"]["cuota"]:
         tipos_a_escribir.append("otros")
 
-    cuota_g_total = 0.0
-    cuota_i_total = 0.0
+    filas_por_tipo = {}
     for tipo in tipos_a_escribir:
-        cuota_g = sumas_g[tipo]["cuota"]
-        cuota_i = sumas_i[tipo]["cuota"]
         etiqueta_tipo = "ALTRES" if tipo == "otros" else tipo
         ws.cell(row=fila, column=1, value=etiqueta_tipo)
-        celda_g = ws.cell(row=fila, column=2, value=round(cuota_g, 2))
-        celda_g.number_format = FORMATO_MONEDA
-        celda_i = ws.cell(row=fila, column=3, value=round(cuota_i, 2))
-        celda_i.number_format = FORMATO_MONEDA
-        cuota_g_total += cuota_g
-        cuota_i_total += cuota_i
+        ws.cell(row=fila, column=2).number_format = FORMATO_MONEDA
+        ws.cell(row=fila, column=3).number_format = FORMATO_MONEDA
+        filas_por_tipo[tipo] = fila
         fila += 1
 
-    resultat = cuota_i_total - cuota_g_total
     for col in range(1, 4):
         ws.cell(row=fila, column=col).border = BORDE_SUPERIOR
     ws.cell(row=fila, column=1, value="RESULTAT IVA (repercutit − suportat)").font = ESTILO_ENCABEZADO
-    celda = ws.cell(row=fila, column=3, value=round(resultat, 2))
-    celda.font = ESTILO_ENCABEZADO
-    celda.number_format = FORMATO_MONEDA
+    ws.cell(row=fila, column=3).font = ESTILO_ENCABEZADO
+    ws.cell(row=fila, column=3).number_format = FORMATO_MONEDA
+    fila_resultat = fila
     fila += 1
 
     nota = (
@@ -511,16 +657,169 @@ def escribir_resultat_trimestre(ws, fila, sumas_g, sumas_i):
     ws.cell(row=fila, column=1, value=nota).font = FUENTE_NOTA
     fila += 1
 
-    return fila + 1, cuota_g_total, cuota_i_total
+    info = {"filas_por_tipo": filas_por_tipo, "fila_resultat": fila_resultat}
+    return fila + 1, info
 
 
-COLUMNAS_DETALLE = ["Data", "Núm. factura", "Proveïdor", "NIF", "Base", "%IVA", "Quota", "Total", "Estat"]
+def escribir_formulas_resultat(ws, info, rango_g, rango_i, sumas_g, sumas_i):
+    """Piso 12A: rellena RESULTAT DEL TRIMESTRE con formulas =SUM()
+    sobre los MISMOS rangos de DETALL que ya usan DESPESES/INGRESSOS
+    (rango_g/rango_i, devueltos por escribir_detalle) -- la misma
+    cifra, calculada de forma independiente. RESULTAT IVA es una unica
+    formula con las dos SUM() restadas (=SUM(ingressos)-SUM(despeses)),
+    tambien referida directamente a DETALL, nunca a otra celda-formula."""
+    comprobaciones = []
+
+    for tipo, fila_tipo in info["filas_por_tipo"].items():
+        rg = rango_g["tipos"].get(tipo)
+        celda_g = ws.cell(row=fila_tipo, column=2)
+        if rg is None:
+            celda_g.value = 0
+        else:
+            ini, fin = rg
+            celda_g.value = f"=SUM({COLUMNA_QUOTA_DETALLE}{ini}:{COLUMNA_QUOTA_DETALLE}{fin})"
+            comprobaciones.append((celda_g.coordinate, COLUMNA_QUOTA_DETALLE, ini, fin, round(sumas_g[tipo]["cuota"], 2)))
+
+        ri = rango_i["tipos"].get(tipo)
+        celda_i = ws.cell(row=fila_tipo, column=3)
+        if ri is None:
+            celda_i.value = 0
+        else:
+            ini, fin = ri
+            celda_i.value = f"=SUM({COLUMNA_QUOTA_DETALLE}{ini}:{COLUMNA_QUOTA_DETALLE}{fin})"
+            comprobaciones.append((celda_i.coordinate, COLUMNA_QUOTA_DETALLE, ini, fin, round(sumas_i[tipo]["cuota"], 2)))
+
+    fila_resultat = info["fila_resultat"]
+    celda_resultat = ws.cell(row=fila_resultat, column=3)
+    rango_bloque_g = rango_g["bloque"]
+    rango_bloque_i = rango_i["bloque"]
+    cuota_g_total = round(sum(sumas_g[t]["cuota"] for t in sumas_g), 2)
+    cuota_i_total = round(sum(sumas_i[t]["cuota"] for t in sumas_i), 2)
+    if rango_bloque_g is not None and rango_bloque_i is not None:
+        ini_g, fin_g = rango_bloque_g
+        ini_i, fin_i = rango_bloque_i
+        celda_resultat.value = (
+            f"=SUM({COLUMNA_QUOTA_DETALLE}{ini_i}:{COLUMNA_QUOTA_DETALLE}{fin_i})"
+            f"-SUM({COLUMNA_QUOTA_DETALLE}{ini_g}:{COLUMNA_QUOTA_DETALLE}{fin_g})"
+        )
+        comprobaciones.append((
+            celda_resultat.coordinate, "resta",
+            (COLUMNA_QUOTA_DETALLE, ini_i, fin_i), (COLUMNA_QUOTA_DETALLE, ini_g, fin_g),
+            round(cuota_i_total - cuota_g_total, 2),
+        ))
+    else:
+        celda_resultat.value = round(cuota_i_total - cuota_g_total, 2)
+
+    return comprobaciones
+
+
+COLUMNAS_DETALLE = ["Data", "Núm. factura", "Proveïdor", "NIF", "Base", "%IVA", "Quota", "Retenció", "Total", "Estat"]
+COLUMNA_BASE_DETALLE = "E"
+COLUMNA_QUOTA_DETALLE = "G"
+COLUMNA_RETENCIO_DETALLE = "H"
+COLUMNA_TOTAL_DETALLE = "I"
+
+
+def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, carpeta_cliente, decision, nombres_ya_mostrados, relleno_forzado=None):
+    """Escribe una fila de DETALL (una linia d'IVA). Si relleno_forzado
+    es None, el color/estat se deriva de decision/estado (bloque
+    FACTURES QUE SUMEN); si no, se usa tal cual (bloque PENDENTS,
+    siempre taronja). nombres_ya_mostrados es un set compartido entre
+    llamadas de la MISMA escribir_detalle -- Retenció y Total son por
+    factura, no por linia d'IVA, asi que solo se muestran en la primera
+    linia escrita de cada factura: si una factura tiene mas de un tipus
+    d'IVA (mas de una linia), repetirlos en cada fila haria que el
+    =SUM() de la columna los contara dos veces."""
+    estado = datos.get("estado")
+    ruta_original = encontrar_original(carpeta_original, nombre)
+
+    es_abonament = (datos.get("total") or 0) < 0
+    tiene_avisos = (
+        validar_nif(datos.get("nif_proveedor")) is False
+        or validar_nif(datos.get("nif_receptor")) is False
+        or not verificar_retencion(datos)
+    )
+
+    if relleno_forzado is not None:
+        estado_mostrado = estado
+        relleno = relleno_forzado
+    elif decision and decision.get("accion") == "descartar":
+        estado_mostrado = f"DESCARTAT ({decision.get('nota', '')})"
+        relleno = RELLENO_DESCARTAT
+    elif decision and decision.get("accion") == "aprovar":
+        estado_mostrado = f"OK ★ (aprovat manualment per {decision.get('qui', '')}, {decision.get('data', '')})"
+        relleno = RELLENO_OK
+    else:
+        estado_mostrado = estado
+        relleno = RELLENO_AVISO if estado == "REVISAR" else RELLENO_OK
+
+    if es_abonament:
+        estado_mostrado += " (ABONAMENT)"
+    if tiene_avisos:
+        estado_mostrado += " ⚠"
+
+    # Piso 11B: distintiu "corregit" -- mismo patron aditivo que
+    # ABONAMENT/⚠. camps_corregits lo escribe validar.py (cirugia
+    # minima alli); aqui solo se muestra, ninguna suma cambia.
+    camps_corregits = datos.get("camps_corregits") or []
+    if camps_corregits:
+        detall = "; ".join(f"{c['camp']}: {c['antic']}→{c['nou']}" for c in camps_corregits)
+        estado_mostrado += f" | CORREGIT ({detall})"
+
+    ws.cell(row=fila, column=1, value=datos.get("fecha_factura"))
+    celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
+    if ruta_original:
+        celda_num.hyperlink = os.path.relpath(ruta_original, carpeta_cliente)
+        celda_num.font = ESTILO_ENLACE
+    ws.cell(row=fila, column=3, value=datos.get("proveedor"))
+    ws.cell(row=fila, column=4, value=datos.get("nif_proveedor"))
+    celda_base = ws.cell(row=fila, column=5, value=linea.get("base"))
+    celda_base.number_format = FORMATO_MONEDA
+    celda_tipo = ws.cell(row=fila, column=6, value=linea.get("tipo_iva"))
+    celda_tipo.number_format = FORMATO_PORCENTAJE
+    celda_cuota = ws.cell(row=fila, column=7, value=linea.get("cuota"))
+    celda_cuota.number_format = FORMATO_MONEDA
+    celda_retencio = ws.cell(row=fila, column=8)
+    celda_retencio.number_format = FORMATO_MONEDA
+    celda_total = ws.cell(row=fila, column=9)
+    celda_total.number_format = FORMATO_MONEDA
+    if nombre not in nombres_ya_mostrados:
+        celda_retencio.value = datos.get("retencion_cuota") or None
+        celda_total.value = datos.get("total")
+        nombres_ya_mostrados.add(nombre)
+    ws.cell(row=fila, column=10, value=estado_mostrado)
+
+    for col in range(1, len(COLUMNAS_DETALLE) + 1):
+        ws.cell(row=fila, column=col).fill = relleno
 
 
 def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_cliente, decisiones):
-    """Una fila por linea de IVA de cada factura (OK, REVISAR y
-    DESCARTAT juntas) -- para poder auditar de donde sale cada suma de
-    los bloques de arriba. No cambia ningun total: es solo para mirar."""
+    """Piso 12A: DETALL en dos bloques -- "FACTURES QUE SUMEN" (las
+    mismas que hoy cuentan en sumar_bloque: OK crudo o decision
+    aprovar, nunca descartades), agrupadas y ordenadas por tipus d'IVA
+    para que cada tipo ocupe un rango de filas seguido (imprescindible
+    para poder sumarlo luego con un =SUM() simple); y debajo "PENDENTS
+    -- NO SUMEN" (las REVISAR sin decision, en taronja, con el mismo
+    detalle de linias, para auditar sin que sumen). Las DESCARTADES ya
+    tienen su propio bloque (DESCARTATS, con nota/qui/data) y no se
+    repiten aqui.
+
+    Devuelve (fila, rangos) -- rangos = {"bloque": (ini, fin) o None,
+    "tipos": {tipo: (ini, fin)}} con las filas EXACTAS de "FACTURES QUE
+    SUMEN", que escribir_formulas_bloque/escribir_formulas_resultat
+    necesitan para poder escribir sus =SUM()."""
+    facturas_suman = []
+    facturas_pendientes = []
+    for nombre, datos in facturas:
+        decision = decisiones.get(nombre)
+        if decision and decision.get("accion") == "descartar":
+            continue
+        cuenta = datos.get("estado") == "OK" or (decision and decision.get("accion") == "aprovar")
+        if cuenta:
+            facturas_suman.append((nombre, datos))
+        else:
+            facturas_pendientes.append((nombre, datos))
+
     for col in range(1, len(COLUMNAS_DETALLE) + 1):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
@@ -528,70 +827,62 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
     ws.cell(row=fila, column=1, value=titulo)
     fila += 1
 
+    ws.cell(row=fila, column=1, value="FACTURES QUE SUMEN").font = ESTILO_ENCABEZADO
+    fila += 1
     for col, texto in enumerate(COLUMNAS_DETALLE, start=1):
         ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
     fila += 1
 
-    for nombre, datos in facturas:
-        estado = datos.get("estado")
-        lineas = datos.get("lineas_iva") or [{}]
-        ruta_original = encontrar_original(carpeta_original, nombre)
+    lineas_que_suman = []
+    for nombre, datos in facturas_suman:
+        for linea in (datos.get("lineas_iva") or [{}]):
+            tipo = linea.get("tipo_iva")
+            clave_tipo = tipo if tipo in TIPOS_IVA else "otros"
+            lineas_que_suman.append((clave_tipo, nombre, datos, linea))
+
+    orden_tipo = {tipo: i for i, tipo in enumerate(TIPOS_IVA)}
+    orden_tipo["otros"] = len(TIPOS_IVA)
+    lineas_que_suman.sort(key=lambda x: orden_tipo.get(x[0], 999))
+
+    nombres_ya_mostrados = set()
+    rango_tipos = {}
+    fila_inicio_bloque = fila if lineas_que_suman else None
+    tipo_actual = None
+    fila_inicio_tipo = fila
+    for clave_tipo, nombre, datos, linea in lineas_que_suman:
+        if clave_tipo != tipo_actual:
+            if tipo_actual is not None:
+                rango_tipos[tipo_actual] = (fila_inicio_tipo, fila - 1)
+            tipo_actual = clave_tipo
+            fila_inicio_tipo = fila
         decision = decisiones.get(nombre)
+        _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, carpeta_cliente, decision, nombres_ya_mostrados)
+        fila += 1
+    if tipo_actual is not None:
+        rango_tipos[tipo_actual] = (fila_inicio_tipo, fila - 1)
+    fila_fin_bloque = (fila - 1) if lineas_que_suman else None
 
-        es_abonament = (datos.get("total") or 0) < 0
-        tiene_avisos = (
-            validar_nif(datos.get("nif_proveedor")) is False
-            or validar_nif(datos.get("nif_receptor")) is False
-            or not verificar_retencion(datos)
-        )
+    rangos = {"bloque": (fila_inicio_bloque, fila_fin_bloque) if lineas_que_suman else None, "tipos": rango_tipos}
+    fila += 1  # fila en blanco
 
-        if decision and decision.get("accion") == "descartar":
-            estado_mostrado = f"DESCARTAT ({decision.get('nota', '')})"
-            relleno = RELLENO_DESCARTAT
-        elif decision and decision.get("accion") == "aprovar":
-            estado_mostrado = f"OK ★ (aprovat manualment per {decision.get('qui', '')}, {decision.get('data', '')})"
-            relleno = RELLENO_OK
-        else:
-            estado_mostrado = estado
-            relleno = RELLENO_AVISO if estado == "REVISAR" else RELLENO_OK
+    if facturas_pendientes:
+        ws.cell(row=fila, column=1, value="PENDENTS — NO SUMEN").font = ESTILO_ENCABEZADO
+        for col in range(1, len(COLUMNAS_DETALLE) + 1):
+            ws.cell(row=fila, column=col).fill = RELLENO_AVISO
+        fila += 1
+        for col, texto in enumerate(COLUMNAS_DETALLE, start=1):
+            ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
+        fila += 1
+        nombres_ya_mostrados_pendents = set()
+        for nombre, datos in facturas_pendientes:
+            for linea in (datos.get("lineas_iva") or [{}]):
+                _escribir_fila_detalle(
+                    ws, fila, nombre, datos, linea, carpeta_original, carpeta_cliente, None,
+                    nombres_ya_mostrados_pendents, relleno_forzado=RELLENO_AVISO,
+                )
+                fila += 1
 
-        if es_abonament:
-            estado_mostrado += " (ABONAMENT)"
-        if tiene_avisos:
-            estado_mostrado += " ⚠"
-
-        # Piso 11B: distintiu "corregit" -- mismo patron aditivo que
-        # ABONAMENT/⚠. camps_corregits lo escribe validar.py (cirugia
-        # minima alli); aqui solo se muestra, ninguna suma cambia.
-        camps_corregits = datos.get("camps_corregits") or []
-        if camps_corregits:
-            detall = "; ".join(f"{c['camp']}: {c['antic']}→{c['nou']}" for c in camps_corregits)
-            estado_mostrado += f" | CORREGIT ({detall})"
-
-        for linea in lineas:
-            celda_nombre = ws.cell(row=fila, column=1, value=datos.get("fecha_factura"))
-            celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
-            if ruta_original:
-                celda_num.hyperlink = os.path.relpath(ruta_original, carpeta_cliente)
-                celda_num.font = ESTILO_ENLACE
-            ws.cell(row=fila, column=3, value=datos.get("proveedor"))
-            ws.cell(row=fila, column=4, value=datos.get("nif_proveedor"))
-            celda_base = ws.cell(row=fila, column=5, value=linea.get("base"))
-            celda_base.number_format = FORMATO_MONEDA
-            celda_tipo = ws.cell(row=fila, column=6, value=linea.get("tipo_iva"))
-            celda_tipo.number_format = FORMATO_PORCENTAJE
-            celda_cuota = ws.cell(row=fila, column=7, value=linea.get("cuota"))
-            celda_cuota.number_format = FORMATO_MONEDA
-            celda_total = ws.cell(row=fila, column=8, value=datos.get("total"))
-            celda_total.number_format = FORMATO_MONEDA
-            ws.cell(row=fila, column=9, value=estado_mostrado)
-
-            for col in range(1, len(COLUMNAS_DETALLE) + 1):
-                ws.cell(row=fila, column=col).fill = relleno
-
-            fila += 1
-
-    return fila + 1
+    return fila + 1, rangos
 
 
 def cargar_manifiestos(carpeta_lotes_procesados):
@@ -918,6 +1209,8 @@ for fila_cliente in leer_clientes():
         ["SIN FECHA"] if "SIN FECHA" in trimestres else []
     )
 
+    comprobaciones_por_hoja = {}
+
     for trimestre in orden:
         datos_trimestre = trimestres[trimestre]
         nombre_hoja = "SENSE DATA" if trimestre == "SIN FECHA" else trimestre
@@ -930,20 +1223,23 @@ for fila_cliente in leer_clientes():
         ws.column_dimensions["F"].width = 10
         ws.column_dimensions["G"].width = 14
         ws.column_dimensions["H"].width = 14
-        ws.column_dimensions["I"].width = 12
+        ws.column_dimensions["I"].width = 14
+        ws.column_dimensions["J"].width = 12
 
         fila = escribir_titulo(ws, fila_cliente["nombre"], fila_cliente["nif"])
         pendientes = []
         descartados_totales = []
 
         if trimestre != "SIN FECHA":
+            # Piso 12A: 1a pasada -- estructura de RESULTAT/DESPESES/INGRESSOS,
+            # celdas numericas en blanco (se rellenan en la 3a pasada, una vez
+            # se conoce el rango exacto de filas de DETALL).
             sumas_g, total_g, _, revisar_g, descartados_g = sumar_bloque(datos_trimestre["gastos"], decisiones)
             sumas_i, total_i, retencion_i, revisar_i, descartados_i = sumar_bloque(datos_trimestre["ingresos"], decisiones)
 
-            fila, _, _ = escribir_resultat_trimestre(ws, fila, sumas_g, sumas_i)
-
-            fila = escribir_bloque(ws, fila, "DESPESES", sumas_g, total_g, con_retencion=False, retencion_ok=0)
-            fila = escribir_bloque(ws, fila, "INGRESSOS", sumas_i, total_i, con_retencion=True, retencion_ok=retencion_i)
+            fila, info_resultat = escribir_resultat_estructura(ws, fila, sumas_g, sumas_i)
+            fila, info_g = escribir_bloque(ws, fila, "DESPESES", sumas_g, con_retencion=False)
+            fila, info_i = escribir_bloque(ws, fila, "INGRESSOS", sumas_i, con_retencion=True)
 
             n_ok_g = len(datos_trimestre["gastos"]) - len(revisar_g) - len(descartados_g)
             n_ok_i = len(datos_trimestre["ingresos"]) - len(revisar_i) - len(descartados_i)
@@ -962,6 +1258,7 @@ for fila_cliente in leer_clientes():
         for nombre, datos in revisar_i:
             pendientes.append((nombre, datos, "INGRÉS", f"{carpeta_cliente}/{origen_ingressos}"))
 
+        # 2a pasada: PENDENT DE REVISIÓ y DESCARTATS, igual que siempre.
         if pendientes:
             fila = escribir_pendientes(ws, fila, pendientes, carpeta_cliente)
 
@@ -974,14 +1271,23 @@ for fila_cliente in leer_clientes():
             fila = escribir_descartados(ws, fila, descartados_totales, carpeta_cliente)
 
         if trimestre != "SIN FECHA":
-            fila = escribir_detalle(
+            # 3a pasada: DETALL (anota los rangos de fila de "FACTURES QUE
+            # SUMEN") y, con esos rangos ya conocidos, se rellenan las celdas
+            # que la 1a pasada dejo en blanco con formulas =SUM().
+            fila, rango_g = escribir_detalle(
                 ws, fila, "DETALL DESPESES", datos_trimestre["gastos"],
                 f"{carpeta_cliente}/rebudes", carpeta_cliente, decisiones,
             )
-            fila = escribir_detalle(
+            fila, rango_i = escribir_detalle(
                 ws, fila, "DETALL INGRESSOS", datos_trimestre["ingresos"],
                 f"{carpeta_cliente}/{origen_ingressos}", carpeta_cliente, decisiones,
             )
+
+            comprobaciones = []
+            comprobaciones += escribir_formulas_bloque(ws, info_g, rango_g, sumas_g, total_g, 0)
+            comprobaciones += escribir_formulas_bloque(ws, info_i, rango_i, sumas_i, total_i, retencion_i)
+            comprobaciones += escribir_formulas_resultat(ws, info_resultat, rango_g, rango_i, sumas_g, sumas_i)
+            comprobaciones_por_hoja[nombre_hoja] = comprobaciones
 
     ws_avisos = wb.create_sheet("AVISOS")
     ws_avisos.column_dimensions["A"].width = 55
@@ -1004,3 +1310,6 @@ for fila_cliente in leer_clientes():
     wb.save(ruta_excel)
     print(f"Escrito: {ruta_excel}")
     verificar_enlaces_excel(ruta_excel, carpeta_cliente)
+    if comprobaciones_por_hoja:
+        n_formulas = verificar_formulas(ruta_excel, comprobaciones_por_hoja)
+        print(f"{carpeta} / excel: Fórmules verificades: {n_formulas}")
