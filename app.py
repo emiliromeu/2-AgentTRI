@@ -6,6 +6,18 @@ ma. No calcula ni valida res: la logica de negoci viu nomes a les
 cinc maquines (trocear, extraer_todas, validar, sumar, informe), que
 aquesta app no toca ni importa (totes executen el seu bucle principal
 en carregar-se -- convencio des del piso 2).
+
+Piso 10.2: verificada clic a clic en navegador real (Playwright, la
+extensio de Chrome no connectava). Tres bugs reals arreglats: (1) la
+carpeta de "Nou client" ara es deriva en viu i no s'edita a ma --
+calia treure el camp del st.form, que no reexecuta en cada tecla;
+(2) "Obrir informe"/"Obrir Excel" no feien res -- Chromium bloqueja
+la navegacio file:// des d'un origen http://localhost (confirmat amb
+la consola real), aixi que ara s'obren amb `open` (macOS) des del
+costat Python, en el seu lloc real; (3) la pantalla final nomes
+oferia un client -- ara ensenya tots (ejecutar.py els processa tots
+de cop). De pas: totes les rutes s'ancoren a la carpeta del propi
+app.py (RAIZ_PROYECTO), no al directori des d'on es llanci streamlit.
 """
 
 import csv
@@ -21,7 +33,17 @@ from pillow_heif import register_heif_opener
 
 register_heif_opener()
 
-RUTA_CLIENTES_CSV = "clientes/clientes.csv"
+# Piso 10.2: ancorat a la carpeta d'aquest arxiu, no al directori des
+# d'on es llanci `streamlit run` -- abans "clientes/..." nomes
+# funcionava si s'arrencava amb el cwd a l'arrel del projecte.
+RAIZ_PROYECTO = os.path.dirname(os.path.abspath(__file__))
+
+
+def ruta_proyecto(*partes):
+    return os.path.join(RAIZ_PROYECTO, *partes)
+
+
+RUTA_CLIENTES_CSV = ruta_proyecto("clientes", "clientes.csv")
 CAMPOS_CLIENTES_CSV = ["nif", "nombre", "carpeta"]
 EXTENSIONES_PERMITIDAS = ["pdf", "jpg", "jpeg", "png", "heic", "heif"]
 EXTENSIONES_HEIC = (".heic", ".heif")
@@ -93,15 +115,15 @@ def anadir_cliente(nif, nombre, carpeta):
         writer = csv.DictWriter(f, fieldnames=CAMPOS_CLIENTES_CSV)
         writer.writeheader()
         writer.writerows(filas)
-    os.makedirs(f"clientes/{carpeta}/rebudes/entrada", exist_ok=True)
-    os.makedirs(f"clientes/{carpeta}/apartados/ingressos", exist_ok=True)
+    os.makedirs(ruta_proyecto("clientes", carpeta, "rebudes", "entrada"), exist_ok=True)
+    os.makedirs(ruta_proyecto("clientes", carpeta, "apartados", "ingressos"), exist_ok=True)
 
 
 def ruta_destino_factures(carpeta, destino):
     if destino == "Compres":
-        return f"clientes/{carpeta}/rebudes/entrada"
+        return ruta_proyecto("clientes", carpeta, "rebudes", "entrada")
     origen_ingressos = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
-    return f"clientes/{carpeta}/{origen_ingressos}"
+    return os.path.join(ruta_proyecto("clientes", carpeta), *origen_ingressos.split("/"))
 
 
 def guardar_archivo(archivo_subido, carpeta_destino):
@@ -131,17 +153,47 @@ def guardar_archivo(archivo_subido, carpeta_destino):
     return nombre_final
 
 
-def boton_obrir(etiqueta, ruta_relativa, key):
-    if os.path.exists(ruta_relativa):
-        st.link_button(etiqueta, f"file://{os.path.abspath(ruta_relativa)}", key=key)
-    else:
-        st.button(etiqueta, disabled=True, key=key)
+def boton_obrir(etiqueta, ruta_absoluta, key):
+    """Piso 10.2: st.link_button con file:// no funciona -- Chromium
+    bloquea la navegacion a file:// desde un origen http://localhost
+    (confirmado con la consola real: "Not allowed to load local
+    resource"). En vez de eso, se abre del lado Python con `open`
+    (macOS), directamente en su sitio -- para que los enlaces
+    relativos del informe a sus originales sigan vivos."""
+    existe = os.path.exists(ruta_absoluta)
+    if st.button(etiqueta, disabled=not existe, key=key):
+        resultado = subprocess.run(["open", ruta_absoluta])
+        if resultado.returncode != 0:
+            st.error(f"No s'ha pogut obrir {ruta_absoluta} (codi {resultado.returncode}).")
+
+
+def tarjeta_cliente(fila, prefijo, lineas_log=None):
+    """Piso 10.2: componente reutilizado en la vista Clients y en el
+    resumen final de Processar (antes cada uno tenia su propio bloque
+    ad-hoc, y el de Processar solo mostraba un cliente)."""
+    carpeta = fila["carpeta"]
+    ruta_informe = ruta_proyecto("clientes", carpeta, "informe_2026.html")
+    ruta_excel = ruta_proyecto("clientes", carpeta, "sumatorios_2026.xlsx")
+    with st.container(border=True):
+        col1, col2, col3 = st.columns([3, 1, 1])
+        with col1:
+            st.markdown(f"**{fila['nombre']}**  \nNIF {fila['nif']} · carpeta `{carpeta}`")
+            if os.path.exists(ruta_informe):
+                mtime = datetime.fromtimestamp(os.path.getmtime(ruta_informe))
+                st.caption(f"Últim run: {mtime.strftime('%d/%m/%Y %H:%M')}")
+            else:
+                st.caption("Encara no s'ha processat.")
+        with col2:
+            boton_obrir("Obrir informe", ruta_informe, key=f"{prefijo}_informe_{carpeta}")
+        with col3:
+            boton_obrir("Obrir Excel", ruta_excel, key=f"{prefijo}_excel_{carpeta}")
+        if lineas_log is not None:
+            with st.expander("Registre d'aquest client"):
+                st.code("\n".join(lineas_log) if lineas_log else "Sense línies per a aquest client.")
 
 
 st.set_page_config(page_title="Agent TRIMESTRE", layout="wide")
 
-if "cliente_actiu" not in st.session_state:
-    st.session_state["cliente_actiu"] = None
 if "log_proces" not in st.session_state:
     st.session_state["log_proces"] = None
 
@@ -157,48 +209,48 @@ if vista == "Clients":
         st.info("Encara no hi ha cap client donat d'alta.")
     else:
         for fila in clientes:
-            carpeta = fila["carpeta"]
-            ruta_informe = f"clientes/{carpeta}/informe_2026.html"
-            ruta_excel = f"clientes/{carpeta}/sumatorios_2026.xlsx"
-            with st.container(border=True):
-                col1, col2, col3 = st.columns([3, 1, 1])
-                with col1:
-                    st.markdown(f"**{fila['nombre']}**  \nNIF {fila['nif']} · carpeta `{carpeta}`")
-                    if os.path.exists(ruta_informe):
-                        mtime = datetime.fromtimestamp(os.path.getmtime(ruta_informe))
-                        st.caption(f"Últim run: {mtime.strftime('%d/%m/%Y %H:%M')}")
-                    else:
-                        st.caption("Encara no s'ha processat.")
-                with col2:
-                    boton_obrir("Obrir informe", ruta_informe, key=f"informe_{carpeta}")
-                with col3:
-                    boton_obrir("Obrir Excel", ruta_excel, key=f"excel_{carpeta}")
+            tarjeta_cliente(fila, "clients")
 
     with st.expander("➕ Nou client"):
-        with st.form("form_nou_client", clear_on_submit=True):
-            nombre = st.text_input("Nom del client")
-            nif_input = st.text_input("NIF")
-            carpeta_sugerida = slug(nombre) if nombre else ""
-            carpeta = st.text_input("Carpeta (identificador intern)", value=carpeta_sugerida)
-            continuar_igualment = st.checkbox("El NIF no quadra la lletra de control -- continuar igualment")
-            enviar = st.form_submit_button("Crear client")
+        # Piso 10.2: FORA de st.form -- els widgets dins d'un form no
+        # reexecuten l'script en cada tecla, i la carpeta derivada
+        # nomes pot ser una vista previa en viu si aquest bloc si ho fa.
+        # Netejar session_state d'un key JA instanciat aquest run peta
+        # (StreamlitAPIException) -- cal fer-ho ABANS d'instanciar el
+        # widget, al rerun seguent, no en el mateix click.
+        if st.session_state.get("nou_client_creat"):
+            st.session_state["nou_nombre"] = ""
+            st.session_state["nou_nif"] = ""
+            st.session_state["nou_client_creat"] = False
 
-        if enviar:
-            nif = normalizar_nif(nif_input)
+        nombre = st.text_input("Nom del client", key="nou_nombre").strip()
+        nif = normalizar_nif(st.text_input("NIF", key="nou_nif"))
+        carpeta_derivada = slug(nombre) if nombre else ""
+        if carpeta_derivada:
+            st.caption(f"Es crearà la carpeta: `{carpeta_derivada}`")
+        elif nombre:
+            st.caption("El nom no genera cap identificador vàlid -- afegeix lletres o números.")
+        continuar_igualment = st.checkbox(
+            "El NIF no quadra la lletra de control -- continuar igualment", key="nou_continuar"
+        )
+
+        if st.button("Crear client", key="nou_crear"):
             carpetas_existentes = {f["carpeta"] for f in leer_clientes()}
-            if not nombre or not nif or not carpeta:
-                st.error("Falten camps: nom, NIF i carpeta són obligatoris.")
-            elif carpeta in carpetas_existentes:
-                st.error(f"Ja existeix un client amb la carpeta '{carpeta}'.")
+            if not nombre or not nif:
+                st.error("Falten camps: nom i NIF són obligatoris.")
+            elif not carpeta_derivada:
+                st.error("El nom no genera cap identificador vàlid -- afegeix lletres o números.")
+            elif carpeta_derivada in carpetas_existentes or os.path.isdir(ruta_proyecto("clientes", carpeta_derivada)):
+                st.error(f"Ja existeix un client amb la carpeta '{carpeta_derivada}'. Ajusta el nom per diferenciar-lo.")
             elif validar_nif(nif) is False and not continuar_igualment:
                 st.warning(
                     "El NIF no supera la validació de la lletra de control. "
                     "Marca 'continuar igualment' si n'estàs segur i torna a enviar."
                 )
             else:
-                anadir_cliente(nif, nombre, carpeta)
-                st.session_state["cliente_actiu"] = carpeta
-                st.success(f"Client '{nombre}' creat (carpeta `{carpeta}`).")
+                anadir_cliente(nif, nombre, carpeta_derivada)
+                st.session_state["nou_client_creat"] = True
+                st.success(f"Client '{nombre}' creat (carpeta `{carpeta_derivada}`).")
                 st.rerun()
 
 # ----------------------------------------------------------------------
@@ -222,7 +274,6 @@ elif vista == "Afegir factures":
         if st.button("Desar arxius", disabled=not archivos):
             carpeta_destino = ruta_destino_factures(carpeta, destino)
             nombres_finales = [guardar_archivo(a, carpeta_destino) for a in archivos]
-            st.session_state["cliente_actiu"] = carpeta
             st.success(f"S'han desat {len(nombres_finales)} arxius a `{carpeta_destino}`:")
             for nombre in nombres_finales:
                 st.write(f"- {nombre}")
@@ -244,6 +295,7 @@ elif vista == "Processar":
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                cwd=RAIZ_PROYECTO,
             )
             for linea in proceso.stdout:
                 buffer += linea
@@ -255,21 +307,16 @@ elif vista == "Processar":
             else:
                 st.error(f"El procés ha acabat amb error (codi {proceso.returncode}).")
 
-        if st.session_state["log_proces"] and st.session_state["cliente_actiu"]:
-            carpeta = st.session_state["cliente_actiu"]
-            fila_cliente = next((f for f in clientes if f["carpeta"] == carpeta), None)
-            if fila_cliente:
-                st.subheader(f"Resum de {fila_cliente['nombre']}")
+        if st.session_state["log_proces"]:
+            st.subheader("Resum per client")
+            st.caption(
+                "S'han processat tots els clients (els que ja estaven al dia "
+                "s'han saltat per idempotència)."
+            )
+            for fila in clientes:
                 linias_cliente = [
                     linia for linia in st.session_state["log_proces"].splitlines()
-                    if linia.startswith(f"{carpeta} ")
+                    if linia.startswith(f"{fila['carpeta']} ")
                 ]
-                st.code("\n".join(linias_cliente) if linias_cliente else "Sense línies per a aquest client.")
-
-                ruta_informe = f"clientes/{carpeta}/informe_2026.html"
-                ruta_excel = f"clientes/{carpeta}/sumatorios_2026.xlsx"
-                col1, col2 = st.columns(2)
-                with col1:
-                    boton_obrir("Obrir informe", ruta_informe, key="final_informe")
-                with col2:
-                    boton_obrir("Obrir Excel", ruta_excel, key="final_excel")
+                tarjeta_cliente(fila, "final", lineas_log=linias_cliente)
+            boton_obrir("Obrir portada", ruta_proyecto("clientes", "index.html"), key="final_portada")
