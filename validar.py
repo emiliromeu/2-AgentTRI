@@ -33,6 +33,11 @@ import csv
 import json
 import os
 import re
+from pathlib import Path
+
+# Piso 13B: ancla el cwd a la carpeta del propio script -- ver trocear.py.
+RAIZ = Path(__file__).resolve().parent
+os.chdir(RAIZ)
 
 TOLERANCIA = 0.02
 

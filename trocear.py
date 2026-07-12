@@ -17,10 +17,19 @@ import csv
 import io
 import json
 import os
+from pathlib import Path
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
 from pypdf import PdfReader, PdfWriter
+
+# Piso 13B: ancla el cwd a la carpeta del propio script -- todo el
+# resto del archivo usa rutas relativas ("clientes/...") que solo son
+# correctas si el proceso arranca ya posicionado aqui. Antes de esto
+# dependia de quien lo lanzara (ejecutar.py, un .bat, una terminal a
+# mano) dejara el cwd bien puesto; ahora se auto-corrige siempre.
+RAIZ = Path(__file__).resolve().parent
+os.chdir(RAIZ)
 
 load_dotenv()
 api_key = os.environ.get("ANTHROPIC_API_KEY")

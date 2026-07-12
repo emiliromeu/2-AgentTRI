@@ -183,7 +183,14 @@ def leer_clientes():
 
 def escribir_clientes(filas):
     """Reescriu clientes.csv sencer -- l'usen anadir_cliente (afegir
-    una fila) i arxivar_cliente (Piso 10.3, treure'n una)."""
+    una fila) i arxivar_cliente (Piso 10.3, treure'n una).
+
+    Piso 13B: open(..., "w") mai crea el directori pare -- si
+    clientes/ no existis (PC nou sense el USB copiat), aixo era
+    exactament el punt real on petava el bug ("Errno 2"). La guardia
+    de dades absents (mes avall) ja hauria de bloquejar abans
+    d'arribar aqui, pero aquest makedirs tanca el forat del tot."""
+    os.makedirs(os.path.dirname(RUTA_CLIENTES_CSV), exist_ok=True)
     with open(RUTA_CLIENTES_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CAMPOS_CLIENTES_CSV)
         writer.writeheader()
@@ -1001,13 +1008,36 @@ h1, h2, h3 {
 </style>
 """
 
+# Piso 13B: assets/ absent no pot tirar avall l'app (regla "jamas
+# caida" -- degradar, mai petar). Sense aquests dos arxius, l'app
+# arrenca igual, nomes sense icona/logo.
+_icono = ruta_proyecto("assets", "olivella.ico")
 st.set_page_config(
     page_title="Agent TRIMESTRE — Gestoria Olivella",
-    page_icon=ruta_proyecto("assets", "olivella.ico"),
+    page_icon=_icono if os.path.exists(_icono) else "📊",
     layout="wide",
 )
-st.logo(ruta_proyecto("assets", "logo_olivella.png"))
+_logo = ruta_proyecto("assets", "logo_olivella.png")
+if os.path.exists(_logo):
+    st.logo(_logo)
 st.markdown(CSS_A3, unsafe_allow_html=True)
+
+# Piso 13B: guàrdia de dades absents -- bloqueja TOTES les vistes amb
+# un únic check (mateix patró que la porta "Qui revisa" de Revisió)
+# en comptes d'un traceback cru. "clientes/" absent es gairebé sempre
+# un PC nou on encara no s'ha copiat el USB amb les dades reals --
+# mai s'auto-crea en silenci (perdria de vista que falten els clients
+# de veritat), es demana explícitament.
+if not os.path.isdir(ruta_proyecto("clientes")):
+    st.title("Agent TRIMESTRE")
+    st.error(
+        "No s'ha trobat la carpeta de dades (`clientes/`).\n\n"
+        "En un PC nou, copia-la des del USB dins de:\n\n"
+        f"`{ruta_proyecto('clientes')}`"
+    )
+    if st.button("Torna-ho a comprovar", type="primary"):
+        st.rerun()
+    st.stop()
 
 if "log_proces" not in st.session_state:
     st.session_state["log_proces"] = None

@@ -12,8 +12,17 @@ Piso 7: incorpora informe.py como quinta maquina.
 """
 
 import glob
+import os
 import subprocess
 import sys
+from pathlib import Path
+
+# Piso 13B: ancla el cwd a la carpeta del propio script -- ver trocear.py.
+# Ademas fija cwd=RAIZ explicito en cada subproceso (pedido explicitamente):
+# defensa en profundidad, correcto aunque este chdir se quite algun dia o
+# ejecutar.py se llame de otro modo.
+RAIZ = Path(__file__).resolve().parent
+os.chdir(RAIZ)
 
 MAQUINAS = ["trocear.py", "extraer_todas.py", "validar.py", "sumar.py", "informe.py"]
 
@@ -24,7 +33,7 @@ def banner(texto):
 
 for maquina in MAQUINAS:
     banner(f"Ejecutando {maquina}")
-    resultado = subprocess.run([sys.executable, maquina])
+    resultado = subprocess.run([sys.executable, maquina], cwd=RAIZ)
     if resultado.returncode != 0:
         print(f"\nAVISO: {maquina} terminó con un error (código {resultado.returncode}). Parando la cadena aquí.")
         sys.exit(1)

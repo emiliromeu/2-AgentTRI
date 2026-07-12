@@ -61,7 +61,12 @@ import json
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import quote, unquote
+
+# Piso 13B: ancla el cwd a la carpeta del propio script -- ver trocear.py.
+RAIZ = Path(__file__).resolve().parent
+os.chdir(RAIZ)
 
 TIPOS_IVA = [0, 4, 5, 10, 12, 21]
 EXTENSIONES_ORIGINAL = (".pdf", ".jpg", ".jpeg", ".png")

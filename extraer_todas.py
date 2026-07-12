@@ -21,9 +21,14 @@ import base64
 import csv
 import json
 import os
+from pathlib import Path
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+
+# Piso 13B: ancla el cwd a la carpeta del propio script -- ver trocear.py.
+RAIZ = Path(__file__).resolve().parent
+os.chdir(RAIZ)
 
 # Bloque a -- cargar la clave desde .env, sin imprimirla jamas (regla 6 de CLAUDE.md)
 load_dotenv()
