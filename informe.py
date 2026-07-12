@@ -223,7 +223,7 @@ def avisos_verificacion(facturas):
 
 
 def leer_clientes():
-    with open("clientes/clientes.csv") as f:
+    with open("clientes/clientes.csv", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
@@ -234,7 +234,7 @@ def cargar_validadas(carpeta):
     for nombre in sorted(os.listdir(carpeta)):
         if not nombre.lower().endswith(".json"):
             continue
-        with open(os.path.join(carpeta, nombre)) as f:
+        with open(os.path.join(carpeta, nombre), encoding="utf-8") as f:
             facturas.append((nombre, json.load(f)))
     return facturas
 
@@ -247,7 +247,7 @@ def cargar_decisiones(carpeta_cliente):
     decisiones = {}
     if not os.path.exists(ruta):
         return decisiones
-    with open(ruta) as f:
+    with open(ruta, encoding="utf-8") as f:
         for fila in csv.DictReader(f):
             archivo = fila.get("archivo")
             if archivo:
@@ -320,7 +320,7 @@ def cargar_manifiestos(carpeta_lotes_procesados):
         if not nombre.endswith("_manifiesto.json"):
             continue
         nombre_lote_pdf = nombre[: -len("_manifiesto.json")] + ".pdf"
-        with open(os.path.join(carpeta_lotes_procesados, nombre)) as f:
+        with open(os.path.join(carpeta_lotes_procesados, nombre), encoding="utf-8") as f:
             documentos = json.load(f)
         manifiestos.append((nombre_lote_pdf, documentos))
     return manifiestos
@@ -413,7 +413,7 @@ def verificar_enlaces(ruta_html, carpeta_cliente):
     i no hauria de passar mai -- 'corrupte' (existeix pero buit o
     truncat) es un problema de dades/sincronitzacio que cap canvi de
     codi pot arreglar, nomes informar."""
-    with open(ruta_html) as f:
+    with open(ruta_html, encoding="utf-8") as f:
         contenido = f.read()
     trencats = []
     corruptes = []
@@ -1009,7 +1009,7 @@ for fila_cliente in leer_clientes():
 </html>"""
 
     ruta_html = f"{carpeta_cliente}/informe_2026.html"
-    with open(ruta_html, "w") as f:
+    with open(ruta_html, "w", encoding="utf-8") as f:
         f.write(html_final)
 
     print(f"{carpeta} / informe: {n_tarjetas} tarjetas")
@@ -1058,6 +1058,6 @@ index_html = f"""<!DOCTYPE html>
 </body>
 </html>"""
 
-with open("clientes/index.html", "w") as f:
+with open("clientes/index.html", "w", encoding="utf-8") as f:
     f.write(index_html)
 print("Escrito: clientes/index.html")

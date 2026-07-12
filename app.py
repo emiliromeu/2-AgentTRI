@@ -177,14 +177,14 @@ def slug(texto):
 def leer_clientes():
     if not os.path.exists(RUTA_CLIENTES_CSV):
         return []
-    with open(RUTA_CLIENTES_CSV) as f:
+    with open(RUTA_CLIENTES_CSV, encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
 def escribir_clientes(filas):
     """Reescriu clientes.csv sencer -- l'usen anadir_cliente (afegir
     una fila) i arxivar_cliente (Piso 10.3, treure'n una)."""
-    with open(RUTA_CLIENTES_CSV, "w", newline="") as f:
+    with open(RUTA_CLIENTES_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CAMPOS_CLIENTES_CSV)
         writer.writeheader()
         writer.writerows(filas)
@@ -226,10 +226,10 @@ def asegurar_gitignore_arxivats():
     ruta_gitignore = ruta_proyecto(".gitignore")
     lineas = []
     if os.path.exists(ruta_gitignore):
-        with open(ruta_gitignore) as f:
+        with open(ruta_gitignore, encoding="utf-8") as f:
             lineas = f.read().splitlines()
     if "arxivats/" not in lineas:
-        with open(ruta_gitignore, "a") as f:
+        with open(ruta_gitignore, "a", encoding="utf-8") as f:
             f.write("arxivats/\n")
 
 
@@ -258,7 +258,7 @@ def arxivar_cliente(fila):
 
     ruta_registro = os.path.join(carpeta_arxivats, "registre_arxivat.csv")
     escribir_cabecera = not os.path.exists(ruta_registro)
-    with open(ruta_registro, "a", newline="") as f:
+    with open(ruta_registro, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if escribir_cabecera:
             writer.writerow(["fecha", "cliente", "nif", "carpeta_origen", "carpeta_destino", "n_archivos"])
@@ -328,14 +328,27 @@ def boton_obrir(etiqueta, ruta_absoluta, key):
     """Piso 10.2: st.link_button con file:// no funciona -- Chromium
     bloquea la navegacion a file:// desde un origen http://localhost
     (confirmado con la consola real: "Not allowed to load local
-    resource"). En vez de eso, se abre del lado Python con `open`
-    (macOS), directamente en su sitio -- para que los enlaces
-    relativos del informe a sus originales sigan vivos."""
+    resource"). En vez de eso, se abre del lado Python, directamente
+    en su sitio -- para que los enlaces relativos del informe a sus
+    originales sigan vivos.
+
+    Piso 13: multiplataforma -- Windows no tiene el comando `open` de
+    macOS. os.startfile() (Windows) no devuelve returncode y puede
+    lanzar OSError (ej. sin asociacion de archivo) -- capturado
+    explicitamente, nunca falla en silencio (regla 4/10)."""
     existe = os.path.exists(ruta_absoluta)
     if st.button(etiqueta, disabled=not existe, key=key):
-        resultado = subprocess.run(["open", ruta_absoluta])
-        if resultado.returncode != 0:
-            st.error(f"No s'ha pogut obrir {ruta_absoluta} (codi {resultado.returncode}).")
+        try:
+            if sys.platform == "win32":
+                os.startfile(ruta_absoluta)
+            elif sys.platform == "darwin":
+                resultado = subprocess.run(["open", ruta_absoluta])
+                if resultado.returncode != 0:
+                    st.error(f"No s'ha pogut obrir {ruta_absoluta} (codi {resultado.returncode}).")
+            else:
+                st.error(f"Plataforma no suportada per obrir arxius: {sys.platform}.")
+        except OSError as e:
+            st.error(f"No s'ha pogut obrir {ruta_absoluta}: {e}")
 
 
 def tarjeta_cliente(fila, prefijo, lineas_log=None):
@@ -499,7 +512,7 @@ def cargar_validadas(carpeta):
     for nombre in sorted(os.listdir(carpeta)):
         if not nombre.lower().endswith(".json"):
             continue
-        with open(os.path.join(carpeta, nombre)) as f:
+        with open(os.path.join(carpeta, nombre), encoding="utf-8") as f:
             facturas.append((nombre, json.load(f)))
     return facturas
 
@@ -511,7 +524,7 @@ def cargar_decisiones(carpeta_cliente):
     decisiones = {}
     if not os.path.exists(ruta):
         return decisiones
-    with open(ruta) as f:
+    with open(ruta, encoding="utf-8") as f:
         for fila in csv.DictReader(f):
             archivo = fila.get("archivo")
             if archivo:
@@ -581,7 +594,7 @@ def escribir_decision(carpeta_cliente, archivo, accion, nota, qui, data=None):
     ruta = os.path.join(carpeta_cliente, "decisions.csv")
     filas = []
     if os.path.exists(ruta):
-        with open(ruta) as f:
+        with open(ruta, encoding="utf-8") as f:
             filas = list(csv.DictReader(f))
     filas = [f for f in filas if f.get("archivo") != archivo]
     filas.append({
@@ -591,7 +604,7 @@ def escribir_decision(carpeta_cliente, archivo, accion, nota, qui, data=None):
         "qui": qui,
         "data": data or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     })
-    with open(ruta, "w", newline="") as f:
+    with open(ruta, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CAMPOS_DECISIONS_CSV)
         writer.writeheader()
         writer.writerows(filas)
@@ -606,7 +619,7 @@ def escribir_correccion(carpeta_cliente, archivo, cambios, motiu, qui):
     ruta = os.path.join(carpeta_cliente, "correccions.csv")
     escribir_cabecera = not os.path.exists(ruta)
     data_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(ruta, "a", newline="") as f:
+    with open(ruta, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if escribir_cabecera:
             writer.writerow(CAMPOS_CORRECCIONS_CSV)
@@ -639,7 +652,7 @@ def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui, nota=None):
 
     ruta_registro = os.path.join(carpeta_retirats, "registre.csv")
     escribir_cabecera = not os.path.exists(ruta_registro)
-    with open(ruta_registro, "a", newline="") as f:
+    with open(ruta_registro, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if escribir_cabecera:
             writer.writerow(["arxiu", "motiu", "qui", "data", "nota"])

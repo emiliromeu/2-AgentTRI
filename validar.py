@@ -44,7 +44,7 @@ CAMPOS_OBLIGATORIOS = [
 
 
 def leer_clientes():
-    with open("clientes/clientes.csv") as f:
+    with open("clientes/clientes.csv", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
@@ -67,7 +67,7 @@ def cargar_correcciones(carpeta_cliente):
     correcciones = {}
     if not os.path.exists(ruta):
         return correcciones
-    with open(ruta) as f:
+    with open(ruta, encoding="utf-8") as f:
         for fila in csv.DictReader(f):
             archivo = fila.get("arxiu")
             if archivo:
@@ -168,7 +168,7 @@ for fila in leer_clientes():
         for nombre in nombres_json:
             ruta = os.path.join(carpeta_entrada, nombre)
             try:
-                with open(ruta) as f:
+                with open(ruta, encoding="utf-8") as f:
                     datos = json.load(f)
                 datos, camps_corregits = aplicar_correcciones(datos, correcciones.get(nombre, []))
                 if camps_corregits:
@@ -262,7 +262,7 @@ for fila in leer_clientes():
                 salida["camps_corregits"] = correcciones_aplicadas[nombre]
 
             ruta_salida = os.path.join(carpeta_salida, nombre)
-            with open(ruta_salida, "w") as f:
+            with open(ruta_salida, "w", encoding="utf-8") as f:
                 json.dump(salida, f, indent=2, ensure_ascii=False)
 
             if motivos:

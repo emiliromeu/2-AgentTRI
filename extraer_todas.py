@@ -42,7 +42,7 @@ MEDIA_TYPE_POR_EXTENSION = {
 
 
 def leer_clientes():
-    with open("clientes/clientes.csv") as f:
+    with open("clientes/clientes.csv", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
@@ -207,7 +207,7 @@ for fila in leer_clientes():
                 texto = respuesta.content[0].text
                 datos = json.loads(limpiar_json(texto))
 
-                with open(ruta_json, "w") as f:
+                with open(ruta_json, "w", encoding="utf-8") as f:
                     json.dump(datos, f, indent=2, ensure_ascii=False)
 
                 print(f"extraída: {nombre_archivo}")

@@ -39,7 +39,7 @@ DESTINO_POR_TIPO = {
 
 
 def leer_clientes():
-    with open("clientes/clientes.csv") as f:
+    with open("clientes/clientes.csv", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
@@ -233,7 +233,7 @@ for fila in leer_clientes():
             # Guardar el manifiesto completo (regla 9: nada muere en silencio,
             # tampoco el enrutado -- sumar.py lo lee para la hoja AVISOS)
             ruta_manifiesto = os.path.join(ruta_procesados, base_lote + "_manifiesto.json")
-            with open(ruta_manifiesto, "w") as f:
+            with open(ruta_manifiesto, "w", encoding="utf-8") as f:
                 json.dump(documentos, f, indent=2, ensure_ascii=False)
 
             os.rename(ruta_lote, ruta_destino_procesado)

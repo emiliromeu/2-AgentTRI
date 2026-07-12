@@ -205,7 +205,7 @@ def verificar_retencion(datos):
 
 
 def leer_clientes():
-    with open("clientes/clientes.csv") as f:
+    with open("clientes/clientes.csv", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
@@ -218,7 +218,7 @@ def cargar_validadas(carpeta):
     for nombre in sorted(os.listdir(carpeta)):
         if not nombre.lower().endswith(".json"):
             continue
-        with open(os.path.join(carpeta, nombre)) as f:
+        with open(os.path.join(carpeta, nombre), encoding="utf-8") as f:
             facturas.append((nombre, json.load(f)))
     return facturas
 
@@ -232,7 +232,7 @@ def cargar_decisiones(carpeta_cliente):
     decisiones = {}
     if not os.path.exists(ruta):
         return decisiones
-    with open(ruta) as f:
+    with open(ruta, encoding="utf-8") as f:
         for fila in csv.DictReader(f):
             archivo = fila.get("archivo")
             if archivo:
@@ -896,7 +896,7 @@ def cargar_manifiestos(carpeta_lotes_procesados):
         if not nombre.endswith("_manifiesto.json"):
             continue
         nombre_lote_pdf = nombre[: -len("_manifiesto.json")] + ".pdf"
-        with open(os.path.join(carpeta_lotes_procesados, nombre)) as f:
+        with open(os.path.join(carpeta_lotes_procesados, nombre), encoding="utf-8") as f:
             documentos = json.load(f)
         manifiestos.append((nombre_lote_pdf, documentos))
     return manifiestos
