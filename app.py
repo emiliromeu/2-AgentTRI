@@ -197,6 +197,16 @@ def escribir_clientes(filas):
         writer.writerows(filas)
 
 
+def registrar_instalacio(cami):
+    """Piso 13C: rastre escrit de quina bifurcació es va triar quan
+    faltava clientes/ -- decisió humana, mai en silenci (regla 4).
+    Es crida sempre DESPRES que clientes/ ja existeixi (als dos
+    camins), aixi que l'open("a") mai falla per directori absent."""
+    ruta = ruta_proyecto("clientes", "instalacio.log")
+    with open(ruta, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {cami}\n")
+
+
 def anadir_cliente(nif, nombre, carpeta):
     filas = leer_clientes()
     filas.append({"nif": nif, "nombre": nombre, "carpeta": carpeta})
@@ -1024,19 +1034,39 @@ st.markdown(CSS_A3, unsafe_allow_html=True)
 
 # Piso 13B: guàrdia de dades absents -- bloqueja TOTES les vistes amb
 # un únic check (mateix patró que la porta "Qui revisa" de Revisió)
-# en comptes d'un traceback cru. "clientes/" absent es gairebé sempre
-# un PC nou on encara no s'ha copiat el USB amb les dades reals --
-# mai s'auto-crea en silenci (perdria de vista que falten els clients
-# de veritat), es demana explícitament.
+# en comptes d'un traceback cru.
+# Piso 13C: bifurcació, no mur -- "clientes/" absent pot ser un PC nou
+# amb dades per copiar del USB, o un PC que comença net de veritat.
+# Cap dels dos botons porta type="primary": mateix pes visual, cap
+# camí es "el recomanat". Els dos deixen rastre a instalacio.log --
+# mai s'auto-crea en silenci sense que algú ho hagi triat.
 if not os.path.isdir(ruta_proyecto("clientes")):
     st.title("Agent TRIMESTRE")
-    st.error(
-        "No s'ha trobat la carpeta de dades (`clientes/`).\n\n"
-        "En un PC nou, copia-la des del USB dins de:\n\n"
-        f"`{ruta_proyecto('clientes')}`"
-    )
-    if st.button("Torna-ho a comprovar", type="primary"):
-        st.rerun()
+    st.warning("Aquest PC encara no té la carpeta de dades (`clientes/`). Tria una opció:")
+
+    col_usb, col_zero = st.columns(2)
+    with col_usb:
+        st.subheader("Tinc dades prèvies (USB)")
+        st.write(
+            "Copia la carpeta `clientes/` des del USB dins de:\n\n"
+            f"`{ruta_proyecto('clientes')}`"
+        )
+        if st.button("Torna-ho a comprovar", key="guardia_comprovar"):
+            if os.path.isdir(ruta_proyecto("clientes")):
+                registrar_instalacio("USB (dades prèvies trobades)")
+            st.rerun()
+    with col_zero:
+        st.subheader("Començar de zero en aquest PC")
+        st.write(
+            "Crea una carpeta `clientes/` buida en aquest PC. "
+            "Podràs donar d'alta clients nous des de la pestanya "
+            "\"Clients\" tot seguit -- \"Nou client\" ja crea la "
+            "carpeta i subcarpetes de cadascun, com sempre."
+        )
+        if st.button("Començar de zero en aquest PC", key="guardia_zero"):
+            escribir_clientes([])
+            registrar_instalacio("Començar de zero en aquest PC")
+            st.rerun()
     st.stop()
 
 if "log_proces" not in st.session_state:
