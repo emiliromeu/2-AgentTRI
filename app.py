@@ -66,6 +66,28 @@ del container i tres regles CSS mes. Vista previa del PDF original:
 primera pagina renderitzada com a imatge amb PyMuPDF (fitz), mantenint
 "Obrir original" per accedir-hi sencer; si no es pot renderitzar, cau
 al comportament d'abans (nomes el boto) -- mai un error sense explicar.
+
+Piso 11C: diagnosticat (navegador real contra davinstal, 240 targetes)
+que un sol clic a Aprovar costava ~33s -- un st.rerun() sencer
+reexecutava tota la pantalla, re-renderitzant les 240 vistes previes
+de PDF sense cap cache (fins i tot les de dins d'un expander tancat,
+que Streamlit igualment munta) i saltant el scroll a dalt. Arreglat de
+tres maneres alhora: (1) tarjeta_revisio/tarjeta_error passen a
+@st.fragment -- un clic reexecuta NOMES aquesta targeta
+(st.rerun(scope="fragment")), mai la resta; cada targeta relegeix
+decisions.csv ella mateixa per saber si ja esta decidida, ja que un
+rerun de fragment no torna a executar el bucle exterior que la crida.
+(2) previsualizar_pdf cacheada per (ruta, mtime) amb st.cache_data --
+mai mes es recalcula si l'arxiu no ha canviat. (3) paginacio de 15 en
+15 a Pendents/Fitxes OK/Errors, que acota el cost de qualsevol futur
+rerun complet. Selecció múltiple amb intenció: checkbox per targeta
+(fora del fragment, perque el comptador de seleccionades es vegi
+sempre al dia) + barra "N seleccionades" que NOMES apareix si hi ha
+selecció -- a Pendents amb nota compartida opcional, a Errors amb nota
+obligatoria i un avis fix sobre arxius corromputs per iCloud. Els
+comptadors de dalt (N pendents...) ja no es poden refrescar sols quan
+es decideix una targeta -- la pantalla ho avisa sempre de forma fixa
+amb un boto "Actualitzar comptadors", mai fingint un numero en viu.
 """
 
 import csv
@@ -282,12 +304,19 @@ def guardar_archivo(archivo_subido, carpeta_destino):
     return nombre_final
 
 
-def previsualizar_pdf(ruta_pdf):
+@st.cache_data(show_spinner=False)
+def previsualizar_pdf(ruta_pdf, mtime):
     """Piso 12B: primera pagina del PDF renderitzada com a imatge en
     memoria (mai es desa a disc). Si el PDF no es pot obrir o
     renderitzar (mateix esperit que archivo_corrupto de sumar.py/
     informe.py), retorna None -- qui la crida cau llavors al boto
-    "Obrir original" sol, mai un error sense explicar."""
+    "Obrir original" sol, mai un error sense explicar.
+
+    Piso 11C: cacheada per (ruta, mtime) -- abans es renderitzava de
+    zero a CADA rerun, per CADA targeta (el cost dominant que feia
+    triguar ~33s un rerun complet amb 240 targetes). mtime a la clau
+    de cache perque si mai es resuja l'original la cache s'invalida
+    sola, no cal netejar-la a ma."""
     try:
         with fitz.open(ruta_pdf) as doc:
             return doc[0].get_pixmap(dpi=100).tobytes("png")
@@ -539,11 +568,16 @@ def detectar_errores(rutas_presentes, carpeta_extraidas):
     return [r for r in rutas_presentes if os.path.splitext(os.path.basename(r))[0] not in extraidos]
 
 
-def escribir_decision(carpeta_cliente, archivo, accion, nota, qui):
+def escribir_decision(carpeta_cliente, archivo, accion, nota, qui, data=None):
     """Piso 11A: primera funcion que ESCRIBE decisions.csv -- hasta
     ahora sumar.py/informe.py solo lo leian (Piso 9.2, rellenado a mano
     por Emili). Si ya habia una decision para este archivo, la
-    sustituye -- no se acumulan filas contradictorias del mismo archivo."""
+    sustituye -- no se acumulan filas contradictorias del mismo archivo.
+
+    Piso 11C: 'data' opcional -- una accion en lote captura UNA marca
+    de tiempo antes del bucle y la pasa a cada llamada, para que las
+    N filas del mismo lote compartan exactamente la misma data (no
+    unos milisegundos distintos cada una)."""
     ruta = os.path.join(carpeta_cliente, "decisions.csv")
     filas = []
     if os.path.exists(ruta):
@@ -555,7 +589,7 @@ def escribir_decision(carpeta_cliente, archivo, accion, nota, qui):
         "accion": accion,
         "nota": nota,
         "qui": qui,
-        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "data": data or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     })
     with open(ruta, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CAMPOS_DECISIONS_CSV)
@@ -580,11 +614,16 @@ def escribir_correccion(carpeta_cliente, archivo, cambios, motiu, qui):
             writer.writerow([archivo, camp, valor_antic, valor_nou, motiu, qui, data_actual])
 
 
-def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui):
+def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui, nota=None):
     """Piso 11A: filosofia A3 igual que arxivar_cliente (Piso 10.3) --
     nunca shutil.rmtree, solo shutil.move. Vive fuera de rebudes/ y
     apartados/ a proposito: asi extraer_todas.py (que si escanea esas
-    carpetas) nunca vuelve a ver el archivo retirado."""
+    carpetas) nunca vuelve a ver el archivo retirado.
+
+    Piso 11C: 'nota' opcional -- la retirada en lot demana una nota
+    compartida obligatoria (el motiu tecnic ja ve derivat sol de
+    motivo_error, aixo es el que escriu la persona). Columna extra a
+    registre.csv, mai llegida per cap altra maquina (comprovat)."""
     carpeta_retirats = os.path.join(carpeta_cliente, "errors_retirats")
     os.makedirs(carpeta_retirats, exist_ok=True)
     nombre_base, extension = os.path.splitext(os.path.basename(ruta_archivo))
@@ -603,8 +642,10 @@ def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui):
     with open(ruta_registro, "a", newline="") as f:
         writer = csv.writer(f)
         if escribir_cabecera:
-            writer.writerow(["arxiu", "motiu", "qui", "data"])
-        writer.writerow([nombre_final, motivo, qui, datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow(["arxiu", "motiu", "qui", "data", "nota"])
+        writer.writerow([
+            nombre_final, motivo, qui, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), nota or "",
+        ])
     return destino
 
 
@@ -674,6 +715,38 @@ def estado_revision_cliente(carpeta):
     }
 
 
+def paginar(lista, key_pagina, por_pagina=15):
+    """Piso 11C: acota a como mucho `por_pagina` elementos por pantalla
+    -- necesario para clientes grandes (davinstal: 240 fitxes), tanto
+    para no saturar la vista com per acotar el cost de qualsevol futur
+    rerun complet (nomes es renderitzen les targetes de LA pagina
+    actual, mai totes). La pagina viu a session_state -- sobreviu a
+    reruns, es reseteja sola si el total de pagines encongeix per sota
+    de la pagina on estaves (ex. despres d'un lot)."""
+    total = len(lista)
+    total_paginas = max(1, (total + por_pagina - 1) // por_pagina)
+    pagina = st.session_state.get(key_pagina, 0)
+    pagina = min(max(pagina, 0), total_paginas - 1)
+    st.session_state[key_pagina] = pagina
+
+    if total_paginas > 1:
+        col_ant, col_info, col_seg = st.columns([1, 3, 1])
+        with col_ant:
+            if st.button("← Anterior", key=f"{key_pagina}_ant", disabled=pagina == 0):
+                st.session_state[key_pagina] = pagina - 1
+                st.rerun()
+        with col_info:
+            st.caption(f"Pàgina {pagina + 1} de {total_paginas} ({total} en total)")
+        with col_seg:
+            if st.button("Següent →", key=f"{key_pagina}_seg", disabled=pagina >= total_paginas - 1):
+                st.session_state[key_pagina] = pagina + 1
+                st.rerun()
+
+    inicio = pagina * por_pagina
+    return lista[inicio:inicio + por_pagina]
+
+
+@st.fragment
 def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
     """Piso 11A: tarjeta de UNA ficha (PENDENT u OK) con las mismas dos
     acciones (Aprovar/Descartar) -- simetria del punto 3: se puede
@@ -688,7 +761,27 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
     al aprobar). qui ya llega siempre relleno -- la puerta de entrada
     a Revisio lo garantiza -- asi que los botones nunca se deshabilitan;
     si falta la nota al descartar, el clic SIEMPRE se procesa y se
-    responde con un st.error visible, nunca en silencio."""
+    responde con un st.error visible, nunca en silencio.
+
+    Piso 11C: @st.fragment -- un clic (Aprovar/Descartar/Corregir) fa
+    rerun NOMES d'aquesta funcio (st.rerun(scope="fragment")), mai de
+    la resta de la pantalla: ni el scroll salta ni les altres targetes
+    es re-renderitzen (abans, ~33s per rerun amb un client gran, tot
+    per re-renderitzar 240 vistes previes de PDF sense cap cache).
+    Com un rerun de fragment NO torna a executar el bucle exterior que
+    la crida, aquesta targeta no pot desapareixer sola de "Pendents"
+    en decidir-se -- per aixo relegeix decisions.csv ELLA MATEIXA al
+    principi (un sol CSV petit, barat) i mostra una confirmacio en
+    comptes del formulari si ja hi ha decisio, en lloc de confiar en
+    la 'decisio' que li va passar el bucle exterior (que pot estar
+    desactualitzada tot i que la ficha ja s'hagi decidit fa un
+    moment). Els comptadors de dalt (N pendents...) NO poden
+    refrescar-se sols quan es decideix una targeta (un rerun de
+    fragment no reexecuta el bloc que els calcula) -- per aixo la
+    pantalla ho avisa sempre de forma fixa amb un boto "Actualitzar
+    comptadors", mai fingint un numero en viu que no ho es."""
+    decision = cargar_decisiones(carpeta_cliente).get(nombre)
+
     ruta_original = encontrar_original(origen, nombre)
     extension = os.path.splitext(ruta_original)[1].lower() if ruta_original else None
 
@@ -731,31 +824,36 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
                 st.image(ruta_original)
             else:
                 if ruta_original and extension == ".pdf":
-                    imagen_pdf = previsualizar_pdf(ruta_original)
+                    imagen_pdf = previsualizar_pdf(ruta_original, os.path.getmtime(ruta_original))
                     if imagen_pdf:
                         st.image(imagen_pdf)
                 boton_obrir("Obrir original", ruta_original or "", key=f"{prefijo}_original_{nombre}")
 
-        with st.form(key=f"form_{prefijo}_{nombre}", border=False):
-            nota = st.text_input(
-                "Nota (obligatòria per descartar; opcional per aprovar)",
-                key=f"{prefijo}_nota_{nombre}",
-            )
-            col_a, col_b = st.columns([1, 2])
-            with col_a:
-                click_aprovar = st.form_submit_button("Aprovar", type="primary")
-            with col_b:
-                click_descartar = st.form_submit_button("Descartar")
+        if decision:
+            etiqueta_accio = "Aprovada" if decision.get("accion") == "aprovar" else "Descartada"
+            nota_mostrada = f" — _{decision.get('nota')}_" if decision.get("nota") else ""
+            st.success(f"✓ {etiqueta_accio} per {decision.get('qui')} el {decision.get('data')}{nota_mostrada}")
+        else:
+            with st.form(key=f"form_{prefijo}_{nombre}", border=False):
+                nota = st.text_input(
+                    "Nota (obligatòria per descartar; opcional per aprovar)",
+                    key=f"{prefijo}_nota_{nombre}",
+                )
+                col_a, col_b = st.columns([1, 2])
+                with col_a:
+                    click_aprovar = st.form_submit_button("Aprovar", type="primary")
+                with col_b:
+                    click_descartar = st.form_submit_button("Descartar")
 
-        if click_aprovar:
-            escribir_decision(carpeta_cliente, nombre, "aprovar", nota, qui)
-            st.rerun()
-        if click_descartar:
-            if not nota:
-                st.error("Cal escriure una nota per descartar.")
-            else:
-                escribir_decision(carpeta_cliente, nombre, "descartar", nota, qui)
-                st.rerun()
+            if click_aprovar:
+                escribir_decision(carpeta_cliente, nombre, "aprovar", nota, qui)
+                st.rerun(scope="fragment")
+            if click_descartar:
+                if not nota:
+                    st.error("Cal escriure una nota per descartar.")
+                else:
+                    escribir_decision(carpeta_cliente, nombre, "descartar", nota, qui)
+                    st.rerun(scope="fragment")
 
         # Piso 11B: "Corregir camps" -- capa de correccio, mai edita
         # extraidas/. Camps precarregats amb el valor ACTUAL; nomes es
@@ -822,24 +920,34 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
                 else:
                     escribir_correccion(carpeta_cliente, nombre, cambios, motiu_correccio, qui)
                     st.success(f"{len(cambios)} camp(s) corregit(s). Cal RECALCULAR perquè es reavaluïn.")
-                    st.rerun()
+                    st.rerun(scope="fragment")
 
 
+@st.fragment
 def tarjeta_error(flujo, ruta, carpeta_cliente, qui, prefijo):
     """Piso 11A: tarjeta por ERROR (archivo presente sin ficha) --
     motivo derivado, enlace, instruccion, y accion RETIRAR (mai
     esborrar, mou a errors_retirats/). Piso 11A-fix: qui ya llega
-    siempre relleno (puerta de entrada), no hace falta disabled=."""
+    siempre relleno (puerta de entrada), no hace falta disabled=.
+
+    Piso 11C: @st.fragment igual que tarjeta_revisio -- Retirar nomes
+    fa rerun d'aquesta targeta. Com el bucle exterior no torna a
+    executar-se, comprova ELLA MATEIXA si l'arxiu encara existeix
+    (pot haver-lo retirat un lot mentre aquesta targeta seguia
+    muntada) abans de mostrar el boto."""
     nombre = os.path.basename(ruta)
     with st.container(border=True, key=f"tarjeta_error_{prefijo}_{nombre}"):
         st.markdown(f"**[{flujo.upper()}] {nombre}**")
-        st.warning(motivo_error(ruta))
-        boton_obrir("Obrir arxiu", ruta, key=f"{prefijo}_error_original_{nombre}")
-        st.caption("Torna a pujar l'arxiu bo des d'\"Afegir factures\".")
-        if st.button("Retirar arxiu il·legible", key=f"{prefijo}_retirar_{nombre}"):
-            destino = retirar_error(carpeta_cliente, ruta, motivo_error(ruta), qui)
-            st.success(f"Arxiu retirat a `{destino}`.")
-            st.rerun()
+        if not os.path.exists(ruta):
+            st.success("✓ Arxiu retirat.")
+        else:
+            st.warning(motivo_error(ruta))
+            boton_obrir("Obrir arxiu", ruta, key=f"{prefijo}_error_original_{nombre}")
+            st.caption("Torna a pujar l'arxiu bo des d'\"Afegir factures\".")
+            if st.button("Retirar arxiu il·legible", key=f"{prefijo}_retirar_{nombre}"):
+                destino = retirar_error(carpeta_cliente, ruta, motivo_error(ruta), qui)
+                st.success(f"Arxiu retirat a `{destino}`.")
+                st.rerun(scope="fragment")
 
 
 # Piso 10.5: unic bloc CSS -- nomes per allo que config.toml no cobreix
@@ -1064,6 +1172,23 @@ elif vista == "Revisió":
             f"{n_decidits} decidits · {n_sin_recalcular} decisions noves sense recalcular"
         )
 
+        # Piso 11C: cada targeta es un @st.fragment -- Aprovar/Descartar/
+        # Retirar nomes reexecuten la targeta, mai aquest bloc exterior,
+        # aixi que aquests numeros NO es poden refrescar sols quan es
+        # decideix una targeta (series fals ensenyar un comptador "en viu"
+        # que en realitat no pot actualitzar-se sense un rerun complet).
+        # Explicit i sempre visible en comptes de silenciós (regla 10):
+        # es diu clarament quan es van calcular i es dona un boto a ma.
+        col_avis, col_boto = st.columns([4, 1])
+        with col_avis:
+            st.caption(
+                "Aquests números són de l'última vegada que es va carregar o refrescar la "
+                "pantalla -- decidir una targeta individual no els actualitza sols."
+            )
+        with col_boto:
+            if st.button("Actualitzar comptadors", key="revisio_actualitzar_comptadors"):
+                st.rerun()
+
         if st.button(
             "RECALCULAR", key="revisio_recalcular",
             type="primary" if n_sin_recalcular > 0 else "secondary",
@@ -1094,32 +1219,96 @@ elif vista == "Revisió":
         with col2:
             boton_obrir("Obrir Excel", os.path.join(estado["carpeta_cliente"], "sumatorios_2026.xlsx"), key="revisio_excel")
 
+        # Piso 11C: checkbox de lot FORA del fragment de cada targeta --
+        # marcar/desmarcar es un rerun normal (ja barat gracies a la
+        # paginacio + cache de PDF), aixi el comptador de seleccionades
+        # es veu sempre al dia sense dependre de fragments. La barra
+        # d'accio en lot NOMES es pinta si hi ha alguna seleccionada --
+        # "no existeix aprovar-ho-tot sense selecció" literalment: no hi
+        # ha res a clicar, no un boto desactivat.
         st.markdown(f"### Pendents sense decisió ({n_pendents})")
         if not estado["pendents"]:
             st.caption("Cap pendent sense decidir.")
-        for nombre, datos, flujo, origen in estado["pendents"]:
-            tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "pendent")
+        else:
+            pagina_pendents = paginar(estado["pendents"], f"revisio_pag_pendents_{carpeta}")
+            for nombre, datos, flujo, origen in pagina_pendents:
+                st.checkbox("Seleccionar per al lot", key=f"revisio_sel_pendent_{carpeta}_{nombre}")
+                tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "pendent")
+
+            seleccionats_pendents = [
+                nombre for nombre, _, _, _ in pagina_pendents
+                if st.session_state.get(f"revisio_sel_pendent_{carpeta}_{nombre}")
+            ]
+            if seleccionats_pendents:
+                st.info(f"{len(seleccionats_pendents)} seleccionades")
+                nota_lot_pendents = st.text_input(
+                    "Nota compartida (opcional)", key=f"revisio_lot_nota_pendents_{carpeta}"
+                )
+                if st.button("APROVAR SELECCIONADES", type="primary", key=f"revisio_lot_aprovar_{carpeta}"):
+                    data_lote = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    for nombre in seleccionats_pendents:
+                        escribir_decision(
+                            estado["carpeta_cliente"], nombre, "aprovar", nota_lot_pendents, qui, data=data_lote,
+                        )
+                    st.rerun()
 
         oks_no_decididas = [
             (n, d, flujo, origen) for n, d, flujo, origen in estado["oks"]
             if n not in estado["decisiones"]
         ]
-        with st.expander(f"Fitxes OK — revisar-les també ({len(oks_no_decididas)})"):
+        # Piso 11C: key= fixa -- abans l'etiqueta portava el recompte
+        # dins del text i Streamlit en derivava la identitat del propi
+        # text, aixi que CADA Aprovar/Descartar (que canvia el recompte)
+        # feia que semblés un expander NOU i el tancava sol encara que
+        # l'usuari l'hagués obert. Amb key= fixa sobreviu a qualsevol
+        # rerun complet futur. Sense lot -- les OK ja sumen.
+        with st.expander(
+            f"Fitxes OK — revisar-les també ({len(oks_no_decididas)})",
+            key=f"revisio_expander_oks_{carpeta}",
+        ):
             oks_ordenadas = sorted(
                 oks_no_decididas, key=lambda t: 0 if avisos_verificacion_ficha(t[1]) else 1
             )
             if not oks_ordenadas:
                 st.caption("Sense fitxes OK.")
-            for nombre, datos, flujo, origen in oks_ordenadas:
-                tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "ok")
+            else:
+                pagina_oks = paginar(oks_ordenadas, f"revisio_pag_oks_{carpeta}")
+                for nombre, datos, flujo, origen in pagina_oks:
+                    tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "ok")
 
         st.markdown(f"### Errors ({n_errores})")
         if not estado["errores"]:
             st.caption("Cap error per resoldre.")
-        for flujo, ruta in estado["errores"]:
-            tarjeta_error(flujo, ruta, estado["carpeta_cliente"], qui, "error")
+        else:
+            st.caption(
+                "Si l'arxiu és bo però va quedar corromput (iCloud), torna'l a pujar "
+                "abans de retirar res."
+            )
+            pagina_errores = paginar(estado["errores"], f"revisio_pag_errors_{carpeta}")
+            for flujo, ruta in pagina_errores:
+                st.checkbox("Seleccionar per al lot", key=f"revisio_sel_error_{carpeta}_{ruta}")
+                tarjeta_error(flujo, ruta, estado["carpeta_cliente"], qui, "error")
 
-        with st.expander(f"Ja decidits ({n_decidits})"):
+            seleccionats_errores = [
+                (flujo, ruta) for flujo, ruta in pagina_errores
+                if st.session_state.get(f"revisio_sel_error_{carpeta}_{ruta}")
+            ]
+            if seleccionats_errores:
+                st.info(f"{len(seleccionats_errores)} seleccionats")
+                nota_lot_errores = st.text_input(
+                    "Nota compartida (obligatòria)", key=f"revisio_lot_nota_errors_{carpeta}"
+                )
+                if st.button("RETIRAR SELECCIONATS", key=f"revisio_lot_retirar_{carpeta}"):
+                    if not nota_lot_errores:
+                        st.error("Cal escriure una nota abans de retirar en lot.")
+                    else:
+                        for flujo, ruta in seleccionats_errores:
+                            retirar_error(
+                                estado["carpeta_cliente"], ruta, motivo_error(ruta), qui, nota=nota_lot_errores,
+                            )
+                        st.rerun()
+
+        with st.expander(f"Ja decidits ({n_decidits})", key=f"revisio_expander_decidits_{carpeta}"):
             if not estado["decisiones"]:
                 st.caption("Cap decisió encara.")
             for archivo, decision in estado["decisiones"].items():
