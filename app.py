@@ -103,6 +103,7 @@ import fitz
 import streamlit as st
 from PIL import Image
 from pillow_heif import register_heif_opener
+from pypdf import PdfReader
 
 register_heif_opener()
 
@@ -120,6 +121,12 @@ RUTA_CLIENTES_CSV = ruta_proyecto("clientes", "clientes.csv")
 CAMPOS_CLIENTES_CSV = ["nif", "nombre", "carpeta"]
 EXTENSIONES_PERMITIDAS = ["pdf", "jpg", "jpeg", "png", "heic", "heif"]
 EXTENSIONES_HEIC = (".heic", ".heif")
+# Piso 13D: valor intern -> text mostrat al radio "Afegir factures".
+DESTINOS_AFEGIR = {
+    "Compres": "Compres",
+    "Vendes": "Vendes",
+    "Lot": "Lot d'escàner (diverses factures en un sol PDF)",
+}
 
 # Igual que en extraer_todas.py/sumar.py/informe.py -- convencion duplicada
 # a proposito (ninguna maquina es importable). Si "Vendes" ignorase esto,
@@ -212,6 +219,12 @@ def anadir_cliente(nif, nombre, carpeta):
     filas.append({"nif": nif, "nombre": nombre, "carpeta": carpeta})
     escribir_clientes(filas)
     os.makedirs(ruta_proyecto("clientes", carpeta, "rebudes", "entrada"), exist_ok=True)
+    # Piso 13D: lotes_escaneados/ (entrada de trocear.py) i
+    # lotes_procesados/ (on deixa el PDF sencer + manifest un cop
+    # trocejat) -- trocear.py ja les tolera absents, pero "Nou client"
+    # deixa l'arbre complet des del primer moment.
+    os.makedirs(ruta_proyecto("clientes", carpeta, "rebudes", "lotes_escaneados"), exist_ok=True)
+    os.makedirs(ruta_proyecto("clientes", carpeta, "rebudes", "lotes_procesados"), exist_ok=True)
     os.makedirs(ruta_proyecto("clientes", carpeta, "apartados", "ingressos"), exist_ok=True)
 
 
@@ -290,6 +303,8 @@ def arxivar_cliente(fila):
 def ruta_destino_factures(carpeta, destino):
     if destino == "Compres":
         return ruta_proyecto("clientes", carpeta, "rebudes", "entrada")
+    if destino == "Lot":
+        return ruta_proyecto("clientes", carpeta, "rebudes", "lotes_escaneados")
     origen_ingressos = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
     return os.path.join(ruta_proyecto("clientes", carpeta), *origen_ingressos.split("/"))
 
@@ -319,6 +334,16 @@ def guardar_archivo(archivo_subido, carpeta_destino):
             f.write(archivo_subido.getvalue())
 
     return nombre_final
+
+
+def guardar_y_reportar(archivos, carpeta_destino):
+    """Piso 13D: factoritzat perque "Afegir factures" el crida des de
+    tres llocs (desar normal, i els dos camins de la guardia de lots
+    despistats) sense repetir el mateix bloc tres cops."""
+    nombres_finales = [guardar_archivo(a, carpeta_destino) for a in archivos]
+    st.success(f"S'han desat {len(nombres_finales)} arxius a `{carpeta_destino}`:")
+    for nombre in nombres_finales:
+        st.write(f"- {nombre}")
 
 
 @st.cache_data(show_spinner=False)
@@ -1139,19 +1164,57 @@ elif vista == "Afegir factures":
         opciones = {f"{f['nombre']} ({f['carpeta']})": f["carpeta"] for f in clientes}
         eleccion = st.selectbox("Client", list(opciones.keys()))
         carpeta = opciones[eleccion]
-        destino = st.radio("Destí", ["Compres", "Vendes"], horizontal=True)
+
+        # Piso 13D: tercer desti -- "Lot d'escaner". format_func desacobla
+        # el valor intern ("Lot") del text llarg mostrat, per no haver de
+        # comparar contra el string sencer a ruta_destino_factures.
+        destino = st.radio(
+            "Destí", list(DESTINOS_AFEGIR.keys()),
+            format_func=lambda k: DESTINOS_AFEGIR[k], horizontal=True,
+        )
+        st.caption(
+            "Factura solta: un únic document per arxiu. Lot d'escàner: un "
+            "sol PDF escanejat amb diverses factures/albarans a dins -- es "
+            "trocejarà automàticament en processar."
+        )
+
+        tipos_permitidos = ["pdf"] if destino == "Lot" else EXTENSIONES_PERMITIDAS
         archivos = st.file_uploader(
             "Arrossega els arxius aquí",
-            type=EXTENSIONES_PERMITIDAS,
+            type=tipos_permitidos,
             accept_multiple_files=True,
         )
 
-        if st.button("Desar arxius", disabled=not archivos, type="primary"):
-            carpeta_destino = ruta_destino_factures(carpeta, destino)
-            nombres_finales = [guardar_archivo(a, carpeta_destino) for a in archivos]
-            st.success(f"S'han desat {len(nombres_finales)} arxius a `{carpeta_destino}`:")
-            for nombre in nombres_finales:
-                st.write(f"- {nombre}")
+        # Piso 13D: guardia de lots despistats -- nomes te sentit si
+        # l'usuari NO ha triat ja "Lot d'escaner" expressament. Mira
+        # cada PDF en memoria (mai es desa res a disc encara).
+        sospitos = None
+        if destino in ("Compres", "Vendes"):
+            for a in archivos or []:
+                if os.path.splitext(a.name)[1].lower() == ".pdf":
+                    try:
+                        n_pag = len(PdfReader(io.BytesIO(a.getvalue())).pages)
+                    except Exception:
+                        continue  # PDF no llegible -- no es el moment de bloquejar
+                    if n_pag > 3:
+                        sospitos = (a.name, n_pag)
+                        break
+
+        if sospitos:
+            nombre_sospitos, n_pag = sospitos
+            st.warning(f"Aquest PDF ({nombre_sospitos}) té {n_pag} pàgines — és un lot d'escàner?")
+            col_si, col_no = st.columns(2)
+            with col_si:
+                confirmar_lot = st.button("Sí, és un lot", key="lot_confirmar")
+            with col_no:
+                confirmar_solta = st.button("No, és una factura llarga", key="lot_descartar")
+            if confirmar_lot:
+                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, "Lot"))
+            elif confirmar_solta:
+                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino))
+        else:
+            if st.button("Desar arxius", disabled=not archivos, type="primary"):
+                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino))
 
 # ----------------------------------------------------------------------
 elif vista == "Processar":
