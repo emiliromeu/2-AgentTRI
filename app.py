@@ -377,20 +377,28 @@ def boton_obrir(etiqueta, ruta_absoluta, key):
     Piso 13: multiplataforma -- Windows no tiene el comando `open` de
     macOS. os.startfile() (Windows) no devuelve returncode y puede
     lanzar OSError (ej. sin asociacion de archivo) -- capturado
-    explicitamente, nunca falla en silencio (regla 4/10)."""
-    existe = os.path.exists(ruta_absoluta)
-    if st.button(etiqueta, disabled=not existe, key=key):
-        try:
-            if sys.platform == "win32":
-                os.startfile(ruta_absoluta)
-            elif sys.platform == "darwin":
-                resultado = subprocess.run(["open", ruta_absoluta])
-                if resultado.returncode != 0:
-                    st.error(f"No s'ha pogut obrir {ruta_absoluta} (codi {resultado.returncode}).")
-            else:
-                st.error(f"Plataforma no suportada per obrir arxius: {sys.platform}.")
-        except OSError as e:
-            st.error(f"No s'ha pogut obrir {ruta_absoluta}: {e}")
+    explicitamente, nunca falla en silencio (regla 4/10).
+
+    Piso 13E: abans el boto se deshabilitava en silenci si l'arxiu no
+    existia -- exactament el que la regla 10 prohibeix. Ara sempre es
+    clicable (mateix patro que Aprovar/Descartar): la comprovacio es
+    fa dins del clic, i si falta mostra la RUTA COMPLETA que ha
+    intentat, perque qualsevol fallada s'autodiagnostiqui sola."""
+    if st.button(etiqueta, key=key):
+        if not os.path.exists(ruta_absoluta):
+            st.error(f"No s'ha trobat l'arxiu:\n\n`{ruta_absoluta}`")
+        else:
+            try:
+                if sys.platform == "win32":
+                    os.startfile(ruta_absoluta)
+                elif sys.platform == "darwin":
+                    resultado = subprocess.run(["open", ruta_absoluta])
+                    if resultado.returncode != 0:
+                        st.error(f"No s'ha pogut obrir {ruta_absoluta} (codi {resultado.returncode}).")
+                else:
+                    st.error(f"Plataforma no suportada per obrir arxius: {sys.platform}.")
+            except OSError as e:
+                st.error(f"No s'ha pogut obrir {ruta_absoluta}: {e}")
 
 
 def tarjeta_cliente(fila, prefijo, lineas_log=None):

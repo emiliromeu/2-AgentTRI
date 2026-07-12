@@ -209,6 +209,14 @@ def verificar_retencion(datos):
     return abs(esperado - retencion_cuota) <= 0.02
 
 
+def ruta_absoluta(ruta):
+    """Piso 13E: hipervincle a ruta ABSOLUTA de la maquina que genera
+    -- funciona encara que l'Excel s'obri des de Descarregues; si el
+    fitxer es mou a un servidor sense clientes/ sencer, l'enllaç mor
+    (acceptat: aquesta copia es una fotografia d'arxiu)."""
+    return str(Path(ruta).resolve())
+
+
 def leer_clientes():
     with open("clientes/clientes.csv", encoding="utf-8") as f:
         return list(csv.DictReader(f))
@@ -460,6 +468,24 @@ def escribir_titulo(ws, nombre_cliente, nif_cliente):
     ws.cell(row=3, column=1, value="Ejercici 2026").font = FUENTE_SUBTITULO
     ws.cell(row=4, column=1, value=f"Generat el {GENERADO_EL}").font = FUENTE_SUBTITULO
     return 6  # fila 5 en blanco, el resto empieza en la 6
+
+
+def configurar_impresion(ws):
+    """Piso 13E: nomes presentacio -- prepara el full per imprimir-se
+    be en paper real (horitzontal, ajustat a 1 pagina d'ample, la
+    capçalera de escribir_titulo repetida a cada pagina, marges
+    estrets). Cap dada ni logica canvia."""
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.print_title_rows = "1:4"
+    ws.page_margins.left = 0.25
+    ws.page_margins.right = 0.25
+    ws.page_margins.top = 0.75
+    ws.page_margins.bottom = 0.75
+    ws.page_margins.header = 0.3
+    ws.page_margins.footer = 0.3
 
 
 def sumar_bloque(facturas, decisiones):
@@ -774,7 +800,7 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     ws.cell(row=fila, column=1, value=datos.get("fecha_factura"))
     celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
     if ruta_original:
-        celda_num.hyperlink = os.path.relpath(ruta_original, carpeta_cliente)
+        celda_num.hyperlink = ruta_absoluta(ruta_original)
         celda_num.font = ESTILO_ENLACE
     ws.cell(row=fila, column=3, value=datos.get("proveedor"))
     ws.cell(row=fila, column=4, value=datos.get("nif_proveedor"))
@@ -976,8 +1002,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
     else:
         for nombre in nombres_albaran:
             celda = ws.cell(row=fila, column=1, value=nombre)
-            ruta_relativa = os.path.relpath(os.path.join(carpeta_albarans, nombre), carpeta_cliente)
-            celda.hyperlink = ruta_relativa
+            celda.hyperlink = ruta_absoluta(os.path.join(carpeta_albarans, nombre))
             celda.font = ESTILO_ENLACE
             celda_justificacion = ws.cell(
                 row=fila,
@@ -1018,7 +1043,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
             celda = ws.cell(row=fila, column=1, value=nombre_lote)
             ruta_lote = os.path.join(carpeta_cliente, "rebudes/lotes_procesados", nombre_lote)
             if os.path.exists(ruta_lote):
-                celda.hyperlink = os.path.relpath(ruta_lote, carpeta_cliente)
+                celda.hyperlink = ruta_absoluta(ruta_lote)
                 celda.font = ESTILO_ENLACE
             ws.cell(row=fila, column=2, value=f"p{doc['pagina_inicio']}-{doc['pagina_fin']}")
             ws.cell(row=fila, column=3, value=doc.get("emisor_pista"))
@@ -1076,7 +1101,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
     else:
         for flujo, ruta in filas_error:
             celda = ws.cell(row=fila, column=1, value=f"[{flujo}] {os.path.basename(ruta)}")
-            celda.hyperlink = os.path.relpath(ruta, carpeta_cliente)
+            celda.hyperlink = ruta_absoluta(ruta)
             celda.font = ESTILO_ENLACE
             celda_motivo = ws.cell(row=fila, column=2, value=motivo_error(ruta))
             celda_motivo.alignment = AJUSTE_TEXTO
@@ -1108,7 +1133,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
             celda = ws.cell(row=fila, column=1, value=nombre)
             ruta_original = encontrar_original(carpeta_origen, nombre)
             if ruta_original:
-                celda.hyperlink = os.path.relpath(ruta_original, carpeta_cliente)
+                celda.hyperlink = ruta_absoluta(ruta_original)
                 celda.font = ESTILO_ENLACE
             celda_motivo = ws.cell(row=fila, column=2, value=motivo)
             celda_motivo.alignment = AJUSTE_TEXTO
@@ -1135,8 +1160,7 @@ def escribir_pendientes(ws, fila, pendientes, carpeta_cliente):
         celda = ws.cell(row=fila, column=1, value=nombre)
         ruta_original = encontrar_original(carpeta_original, nombre)
         if ruta_original:
-            ruta_relativa = os.path.relpath(ruta_original, carpeta_cliente)
-            celda.hyperlink = ruta_relativa
+            celda.hyperlink = ruta_absoluta(ruta_original)
             celda.font = ESTILO_ENLACE
         else:
             print(f"AVISO: no se encontró el original de {nombre}")
@@ -1166,7 +1190,7 @@ def escribir_descartados(ws, fila, descartados, carpeta_cliente):
         celda = ws.cell(row=fila, column=1, value=nombre)
         ruta_original = encontrar_original(carpeta_original, nombre)
         if ruta_original:
-            celda.hyperlink = os.path.relpath(ruta_original, carpeta_cliente)
+            celda.hyperlink = ruta_absoluta(ruta_original)
             celda.font = ESTILO_ENLACE
         ws.cell(row=fila, column=2, value=tipo_bloque)
         nota = decision.get("nota") or ""
@@ -1220,6 +1244,7 @@ for fila_cliente in leer_clientes():
         datos_trimestre = trimestres[trimestre]
         nombre_hoja = "SENSE DATA" if trimestre == "SIN FECHA" else trimestre
         ws = wb.create_sheet(nombre_hoja)
+        configurar_impresion(ws)
         ws.column_dimensions["A"].width = 50
         ws.column_dimensions["B"].width = 14
         ws.column_dimensions["C"].width = 60
@@ -1295,6 +1320,7 @@ for fila_cliente in leer_clientes():
             comprobaciones_por_hoja[nombre_hoja] = comprobaciones
 
     ws_avisos = wb.create_sheet("AVISOS")
+    configurar_impresion(ws_avisos)
     ws_avisos.column_dimensions["A"].width = 55
     ws_avisos.column_dimensions["B"].width = 70
     ws_avisos.column_dimensions["C"].width = 20
