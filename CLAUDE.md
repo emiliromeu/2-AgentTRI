@@ -30,3 +30,8 @@ docs/esquema_canonico_v1.md — leerlo antes de tocar código.
 9. Nada muere en silencio aplica también al enrutado — todo documento
    apartado o descartado debe ser visible en el Excel con su
    justificación.
+10. La interfaz también es ruidosa: jamás botones deshabilitados sin
+    explicación visible; los requisitos previos (firma, notas) se
+    piden de forma bloqueante antes de mostrar acciones, o el clic
+    produce un error visible. Nunca depender de que un text_input de
+    Streamlit esté confirmado con Tab/Enter.
