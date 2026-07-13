@@ -88,6 +88,8 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote, urlparse
+from urllib.request import url2pathname
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -209,12 +211,42 @@ def verificar_retencion(datos):
     return abs(esperado - retencion_cuota) <= 0.02
 
 
-def ruta_absoluta(ruta):
-    """Piso 13E: hipervincle a ruta ABSOLUTA de la maquina que genera
-    -- funciona encara que l'Excel s'obri des de Descarregues; si el
-    fitxer es mou a un servidor sense clientes/ sencer, l'enllaç mor
-    (acceptat: aquesta copia es una fotografia d'arxiu)."""
-    return str(Path(ruta).resolve())
+def uri_fitxer(ruta):
+    """Piso 13G: Excel 2007 exigeix que el Target d'un hyperlink extern
+    sigui una URI valida (RFC 3986) -- confirmat amb evidencia real
+    (descomprimint un .xlsx generat) que una ruta crua amb espais/
+    comes fa que Excel 2007 marqui el paquet sencer com a corrupte i
+    demani "reparar". file:/// + barres normals + percent-encoding."""
+    ruta_resuelta = str(Path(ruta).resolve()).replace("\\", "/")
+    if not ruta_resuelta.startswith("/"):
+        ruta_resuelta = "/" + ruta_resuelta  # Windows: "C:/..." -> "/C:/..."
+    return "file://" + quote(ruta_resuelta, safe="/:")
+
+
+def ruta_desde_uri(uri):
+    """Piso 13G: inversa de uri_fitxer -- nomes per a verificar_enlaces_excel,
+    mai per escriure. url2pathname ja resol be la peculiaritat de
+    Windows (file:///C:/... porta una barra de mes davant de la lletra
+    d'unitat)."""
+    return url2pathname(urlparse(uri).path)
+
+
+# Piso 13G: Pla B preparat pero desactivat -- si Excel 2007 seguis
+# protestant fins i tot amb una URI valida, canviar nomes aquesta
+# constant a False deixa les celdes com a text pla sense hyperlink
+# (els enllaços seguirien disponibles a l'informe HTML, que no es
+# toca en aquest pis). Mai s'activa sol.
+GENERAR_HIPERVINCLES = True
+
+
+def asignar_hipervinculo(celda, ruta):
+    """Piso 13G: centraliza els 7 sitis que abans feien
+    `celda.hyperlink = ...; celda.font = ESTILO_ENLACE` (Piso 13E) --
+    i el punt unic on el Pla B (GENERAR_HIPERVINCLES=False) es
+    commutaria."""
+    if GENERAR_HIPERVINCLES:
+        celda.hyperlink = uri_fitxer(ruta)
+        celda.font = ESTILO_ENLACE
 
 
 def leer_clientes():
@@ -369,7 +401,11 @@ def verificar_enlaces_excel(ruta_xlsx, carpeta_cliente):
     """Piso 9.3: reabre el Excel ya escrito y comprueba cada hyperlink.
     'Trencat' (no existe) es un bug de codigo y no deberia pasar nunca;
     'corrupte' (existe pero vacio o truncado) es un problema de datos
-    que ningun cambio de codigo puede arreglar, solo informar."""
+    que ningun cambio de codigo puede arreglar, solo informar.
+
+    Piso 13G: el target ya es siempre una URI file:// absoluta (nunca
+    relativa a carpeta_cliente) -- se convierte con ruta_desde_uri en
+    vez de unirla con os.path.join."""
     wb = load_workbook(ruta_xlsx)
     verificados = 0
     trencats = []
@@ -380,7 +416,7 @@ def verificar_enlaces_excel(ruta_xlsx, carpeta_cliente):
                 if cell.hyperlink is None:
                     continue
                 verificados += 1
-                ruta = os.path.join(carpeta_cliente, cell.hyperlink.target)
+                ruta = ruta_desde_uri(cell.hyperlink.target)
                 if not os.path.exists(ruta):
                     trencats.append(cell.hyperlink.target)
                 elif archivo_corrupto(ruta):
@@ -800,8 +836,7 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     ws.cell(row=fila, column=1, value=datos.get("fecha_factura"))
     celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
     if ruta_original:
-        celda_num.hyperlink = ruta_absoluta(ruta_original)
-        celda_num.font = ESTILO_ENLACE
+        asignar_hipervinculo(celda_num, ruta_original)
     ws.cell(row=fila, column=3, value=datos.get("proveedor"))
     ws.cell(row=fila, column=4, value=datos.get("nif_proveedor"))
     celda_base = ws.cell(row=fila, column=5, value=linea.get("base"))
@@ -1002,8 +1037,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
     else:
         for nombre in nombres_albaran:
             celda = ws.cell(row=fila, column=1, value=nombre)
-            celda.hyperlink = ruta_absoluta(os.path.join(carpeta_albarans, nombre))
-            celda.font = ESTILO_ENLACE
+            asignar_hipervinculo(celda, os.path.join(carpeta_albarans, nombre))
             celda_justificacion = ws.cell(
                 row=fila,
                 column=2,
@@ -1043,8 +1077,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
             celda = ws.cell(row=fila, column=1, value=nombre_lote)
             ruta_lote = os.path.join(carpeta_cliente, "rebudes/lotes_procesados", nombre_lote)
             if os.path.exists(ruta_lote):
-                celda.hyperlink = ruta_absoluta(ruta_lote)
-                celda.font = ESTILO_ENLACE
+                asignar_hipervinculo(celda, ruta_lote)
             ws.cell(row=fila, column=2, value=f"p{doc['pagina_inicio']}-{doc['pagina_fin']}")
             ws.cell(row=fila, column=3, value=doc.get("emisor_pista"))
             fila += 1
@@ -1101,8 +1134,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
     else:
         for flujo, ruta in filas_error:
             celda = ws.cell(row=fila, column=1, value=f"[{flujo}] {os.path.basename(ruta)}")
-            celda.hyperlink = ruta_absoluta(ruta)
-            celda.font = ESTILO_ENLACE
+            asignar_hipervinculo(celda, ruta)
             celda_motivo = ws.cell(row=fila, column=2, value=motivo_error(ruta))
             celda_motivo.alignment = AJUSTE_TEXTO
             for col in range(1, 3):
@@ -1133,8 +1165,7 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
             celda = ws.cell(row=fila, column=1, value=nombre)
             ruta_original = encontrar_original(carpeta_origen, nombre)
             if ruta_original:
-                celda.hyperlink = ruta_absoluta(ruta_original)
-                celda.font = ESTILO_ENLACE
+                asignar_hipervinculo(celda, ruta_original)
             celda_motivo = ws.cell(row=fila, column=2, value=motivo)
             celda_motivo.alignment = AJUSTE_TEXTO
             fila += 1
@@ -1160,8 +1191,7 @@ def escribir_pendientes(ws, fila, pendientes, carpeta_cliente):
         celda = ws.cell(row=fila, column=1, value=nombre)
         ruta_original = encontrar_original(carpeta_original, nombre)
         if ruta_original:
-            celda.hyperlink = ruta_absoluta(ruta_original)
-            celda.font = ESTILO_ENLACE
+            asignar_hipervinculo(celda, ruta_original)
         else:
             print(f"AVISO: no se encontró el original de {nombre}")
         ws.cell(row=fila, column=2, value=tipo_bloque)
@@ -1190,8 +1220,7 @@ def escribir_descartados(ws, fila, descartados, carpeta_cliente):
         celda = ws.cell(row=fila, column=1, value=nombre)
         ruta_original = encontrar_original(carpeta_original, nombre)
         if ruta_original:
-            celda.hyperlink = ruta_absoluta(ruta_original)
-            celda.font = ESTILO_ENLACE
+            asignar_hipervinculo(celda, ruta_original)
         ws.cell(row=fila, column=2, value=tipo_bloque)
         nota = decision.get("nota") or ""
         qui = decision.get("qui") or ""
@@ -1338,7 +1367,15 @@ for fila_cliente in leer_clientes():
     )
 
     ruta_excel = f"{carpeta_cliente}/sumatorios_2026.xlsx"
-    wb.save(ruta_excel)
+    # Piso 13G: a Windows, un Excel obert bloqueja el fitxer -- es
+    # captura per client (regla 4: el lot mai mor) en comptes de tirar
+    # avall tot el batch, i mai deixa un fitxer a mig escriure (un
+    # altre cami cap a "reparar").
+    try:
+        wb.save(ruta_excel)
+    except PermissionError:
+        print(f"AVISO: {carpeta} -- no s'ha pogut escriure {ruta_excel}. Tanca l'Excel del client abans de recalcular.")
+        continue
     print(f"Escrito: {ruta_excel}")
     verificar_enlaces_excel(ruta_excel, carpeta_cliente)
     if comprobaciones_por_hoja:
