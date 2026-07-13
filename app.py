@@ -106,6 +106,11 @@ from PIL import Image
 from pillow_heif import register_heif_opener
 from pypdf import PdfReader
 
+# Piso 13L: migrar_lot.py es l'unica excepcio a "ninguna maquina es
+# importable" -- no te bucle de nivell superior (nomes definicions),
+# pensat expressament per ser importat des d'aqui.
+import migrar_lot
+
 register_heif_opener()
 
 # Piso 10.2: ancorat a la carpeta d'aquest arxiu, no al directori des
@@ -787,6 +792,58 @@ def tiene_correccion_pendiente(carpeta_cliente, nombre):
     return False
 
 
+def contar_moviments_sense_recalcular(carpeta_cliente):
+    """Piso 13L: mateix patró exacte que contar_decisiones_sin_recalcular
+    però per a moviments_flux.csv (escrit per migrar_lot.moure_de_flux)."""
+    ruta_moviments = os.path.join(carpeta_cliente, "moviments_flux.csv")
+    if not os.path.exists(ruta_moviments):
+        return 0
+    ruta_informe = os.path.join(carpeta_cliente, "informe_2026.html")
+    mtime_informe = os.path.getmtime(ruta_informe) if os.path.exists(ruta_informe) else 0
+    contador = 0
+    with open(ruta_moviments, encoding="utf-8") as f:
+        for fila in csv.DictReader(f):
+            try:
+                marca = datetime.strptime(fila.get("data", ""), "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                continue
+            if marca > mtime_informe:
+                contador += 1
+    return contador
+
+
+def obtener_moviment(carpeta_cliente, nombre_base):
+    """Piso 13L: mateix patró que cargar_decisiones -- l'últim moviment
+    d'aquest document a moviments_flux.csv, si n'hi ha cap. Es fa
+    servir per mostrar "Mogut" a la targeta en comptes del formulari
+    (mateix motiu que decision/camps_corregits: un rerun de fragment
+    no fa desaparèixer la targeta de la llista exterior)."""
+    ruta_moviments = os.path.join(carpeta_cliente, "moviments_flux.csv")
+    if not os.path.exists(ruta_moviments):
+        return None
+    ultimo = None
+    with open(ruta_moviments, encoding="utf-8") as f:
+        for fila in csv.DictReader(f):
+            if fila.get("arxiu") == nombre_base:
+                ultimo = fila
+    return ultimo
+
+
+def sembla_factura_de_lautre_flux(datos, flujo, nif_client):
+    """Piso 13L: senyal (mai automàtic, regla 10 en positiu) -- només
+    ben definit per a rebudes: si el motiu d'identitat ha saltat I el
+    client resulta ser qui EMET (no qui rep, com tocaria en una
+    compra), sembla realment una factura de VENDES mal enviada pel
+    canal de compres. No hi ha senyal simètric fiable per a ingressos
+    (ser emissor hi és un estat vàlid, el "giro" del Piso 6B, no un
+    error)."""
+    if flujo != "rebudes":
+        return False
+    if not any("nif_receptor no coincide" in m for m in (datos.get("motivos") or [])):
+        return False
+    return normalizar_nif(datos.get("nif_proveedor")) == normalizar_nif(nif_client)
+
+
 def estado_revision_cliente(carpeta):
     """Recoge todo lo que necesita la vista Revisio para un cliente:
     fichas (rebudes+ingressos), decisiones, y errores -- todo leido de
@@ -865,10 +922,15 @@ def paginar(lista, key_pagina, por_pagina=15):
 
 
 @st.fragment
-def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
+def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo, nif_client):
     """Piso 11A: tarjeta de UNA ficha (PENDENT u OK) con las mismas dos
     acciones (Aprovar/Descartar) -- simetria del punto 3: se puede
     descartar un OK con nota igual que se aprova un REVISAR.
+
+    Piso 13L: flujo ("rebudes"/"ingressos") y nif_client permiten
+    ofrecer "Moure a l'altre flux" (solo si la fitxa no tiene decisió
+    encara) y, cuando aplica, el suggeriment visible de
+    sembla_factura_de_lautre_flux.
 
     Piso 11A-fix: nota+botones dentro de un st.form -- un form aplica
     TODO lo tecleado en el momento de pulsar cualquiera de sus botones,
@@ -899,6 +961,8 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
     pantalla ho avisa sempre de forma fixa amb un boto "Actualitzar
     comptadors", mai fingint un numero en viu que no ho es."""
     decision = cargar_decisiones(carpeta_cliente).get(nombre)
+    nombre_base = os.path.splitext(nombre)[0]
+    moviment = obtener_moviment(carpeta_cliente, nombre_base)
 
     ruta_original = encontrar_original(origen, nombre)
     extension = os.path.splitext(ruta_original)[1].lower() if ruta_original else None
@@ -952,7 +1016,18 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
                         st.image(imagen_pdf)
                 boton_obrir("Obrir original", ruta_original or "", key=f"{prefijo}_original_{nombre}")
 
-        if decision:
+        if moviment:
+            # Piso 13L: un cop mogut, Aprovar/Descartar/Moure ja no
+            # tenen sentit fins que es recalculi (la fitxa viu ara a
+            # l'altre flux) -- mateix criteri que decision/camps_corregits:
+            # es llegeix en cada render, mai es confia en l'estat que
+            # va passar el bucle exterior.
+            motiu_mostrat = f" — _{moviment.get('motiu')}_" if moviment.get("motiu") else ""
+            st.info(
+                f"↔️ Mogut de {moviment.get('de')} a {moviment.get('a')} per {moviment.get('qui')} "
+                f"el {moviment.get('data')}{motiu_mostrat} · Recalcula per refer els veredictes."
+            )
+        elif decision:
             etiqueta_accio = "Aprovada" if decision.get("accion") == "aprovar" else "Descartada"
             nota_mostrada = f" — _{decision.get('nota')}_" if decision.get("nota") else ""
             st.success(f"✓ {etiqueta_accio} per {decision.get('qui')} el {decision.get('data')}{nota_mostrada}")
@@ -976,6 +1051,26 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
                     st.error("Cal escriure una nota per descartar.")
                 else:
                     escribir_decision(carpeta_cliente, nombre, "descartar", nota, qui)
+                    st.rerun(scope="fragment")
+
+            # Piso 13L: acció discreta "Moure a l'altre flux" -- nomes a
+            # les targetes PENDENT (el cas d'UNA factura pujada al canal
+            # equivocat). Mai automàtic: el suggeriment (quan aplica)
+            # nomes fa mes visible el mateix formulari, la persona
+            # sempre firma el clic.
+            if prefijo == "pendent":
+                flujo_contrari = "Vendes" if flujo == "rebudes" else "Compres"
+                if sembla_factura_de_lautre_flux(datos, flujo, nif_client):
+                    st.warning(f"Sembla una factura de {flujo_contrari.upper()} — vols moure-la?")
+                with st.form(key=f"form_moure_{prefijo}_{nombre}", border=False):
+                    motiu_moure = st.text_input("Motiu (opcional)", key=f"{prefijo}_motiu_moure_{nombre}")
+                    click_moure = st.form_submit_button(f"Moure a {flujo_contrari}")
+                if click_moure:
+                    migrar_lot.moure_de_flux(
+                        os.path.basename(carpeta_cliente), [(nombre_base, flujo)],
+                        motiu_moure or "Moviment individual des de Revisió", qui,
+                    )
+                    st.toast(f"Mogut a {flujo_contrari}. Recalcula per refer els veredictes.", icon="↔️")
                     st.rerun(scope="fragment")
 
         # Piso 11B: "Corregir camps" -- capa de correccio, mai edita
@@ -1415,10 +1510,12 @@ elif vista == "Revisió":
         n_errores = len(estado["errores"])
         n_decidits = len(estado["decisiones"])
         n_sin_recalcular = contar_decisiones_sin_recalcular(estado["carpeta_cliente"], estado["decisiones"])
+        n_moguts_sense_recalcular = contar_moviments_sense_recalcular(estado["carpeta_cliente"])
 
         st.subheader(
             f"{n_pendents} pendents per decidir · {n_errores} errors per resoldre · "
-            f"{n_decidits} decidits · {n_sin_recalcular} decisions noves sense recalcular"
+            f"{n_decidits} decidits · {n_sin_recalcular} decisions noves sense recalcular · "
+            f"{n_moguts_sense_recalcular} moguts sense recalcular"
         )
 
         # Piso 11C: cada targeta es un @st.fragment -- Aprovar/Descartar/
@@ -1440,7 +1537,7 @@ elif vista == "Revisió":
 
         if st.button(
             "RECALCULAR", key="revisio_recalcular",
-            type="primary" if n_sin_recalcular > 0 else "secondary",
+            type="primary" if (n_sin_recalcular > 0 or n_moguts_sense_recalcular > 0) else "secondary",
         ):
             placeholder = st.empty()
             buffer = ""
@@ -1482,24 +1579,44 @@ elif vista == "Revisió":
             pagina_pendents = paginar(estado["pendents"], f"revisio_pag_pendents_{carpeta}")
             for nombre, datos, flujo, origen in pagina_pendents:
                 st.checkbox("Seleccionar per al lot", key=f"revisio_sel_pendent_{carpeta}_{nombre}")
-                tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "pendent")
+                tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "pendent", flujo, fila_cliente["nif"])
 
-            seleccionats_pendents = [
-                nombre for nombre, _, _, _ in pagina_pendents
+            seleccionats_pendents_info = [
+                (nombre, flujo) for nombre, _, flujo, _ in pagina_pendents
                 if st.session_state.get(f"revisio_sel_pendent_{carpeta}_{nombre}")
             ]
+            seleccionats_pendents = [nombre for nombre, _ in seleccionats_pendents_info]
             if seleccionats_pendents:
                 st.info(f"{len(seleccionats_pendents)} seleccionades")
                 nota_lot_pendents = st.text_input(
                     "Nota compartida (opcional)", key=f"revisio_lot_nota_pendents_{carpeta}"
                 )
-                if st.button("APROVAR SELECCIONADES", type="primary", key=f"revisio_lot_aprovar_{carpeta}"):
-                    data_lote = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    for nombre in seleccionats_pendents:
-                        escribir_decision(
-                            estado["carpeta_cliente"], nombre, "aprovar", nota_lot_pendents, qui, data=data_lote,
+                col_aprovar_lot, col_moure_lot = st.columns(2)
+                with col_aprovar_lot:
+                    if st.button("APROVAR SELECCIONADES", type="primary", key=f"revisio_lot_aprovar_{carpeta}"):
+                        data_lote = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        for nombre in seleccionats_pendents:
+                            escribir_decision(
+                                estado["carpeta_cliente"], nombre, "aprovar", nota_lot_pendents, qui, data=data_lote,
+                            )
+                        st.rerun()
+                with col_moure_lot:
+                    # Piso 13L: porta de lot -- cada document viatja al SEU
+                    # propi flux contrari (una seleccio pot barrejar
+                    # rebudes+ingressos alhora).
+                    if st.button("MOURE SELECCIONADES A L'ALTRE FLUX", key=f"revisio_lot_moure_{carpeta}"):
+                        documentos = [
+                            (os.path.splitext(nombre)[0], flujo) for nombre, flujo in seleccionats_pendents_info
+                        ]
+                        migrar_lot.moure_de_flux(
+                            carpeta, documentos,
+                            nota_lot_pendents or "Moviment en lot des de Revisió", qui,
                         )
-                    st.rerun()
+                        st.toast(
+                            f"{len(documentos)} mogudes a l'altre flux. Recalcula per refer els veredictes.",
+                            icon="↔️",
+                        )
+                        st.rerun()
 
         oks_no_decididas = [
             (n, d, flujo, origen) for n, d, flujo, origen in estado["oks"]
@@ -1523,7 +1640,7 @@ elif vista == "Revisió":
             else:
                 pagina_oks = paginar(oks_ordenadas, f"revisio_pag_oks_{carpeta}")
                 for nombre, datos, flujo, origen in pagina_oks:
-                    tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "ok")
+                    tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "ok", flujo, fila_cliente["nif"])
 
         st.markdown(f"### Errors ({n_errores})")
         if not estado["errores"]:
