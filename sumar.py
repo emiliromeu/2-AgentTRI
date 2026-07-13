@@ -51,11 +51,11 @@ datos/sincronizacion, ningun cambio de codigo lo arregla). El motivo
 de un ERROR distingue este caso del generico cuando se detecta.
 
 Piso 11B: distintivo "CORREGIT" en DETALLE (mismo patron aditivo que
-ABONAMENT/⚠) -- si la ficha trae camps_corregits (escrito por
+ABONAMENT/[AVÍS]) -- si la ficha trae camps_corregits (escrito por
 validar.py, unica cirugia del piso), se anexa al texto del estado con
 el detalle antic->nou. Ninguna suma ni logica cambia aqui.
 
-Piso 12A: los totales (RESULTAT, TOTAL de bloque, Σ RETENCIONS) pasan
+Piso 12A: los totales (RESULTAT, TOTAL de bloque, TOTAL RETENCIONS) pasan
 de valores Python ya redondeados a formulas Excel =SUM() reales, para
 que Emili pueda ver -y en su caso retocar- de donde sale cada numero
 directamente en el libro. Para que esas formulas puedan apuntar a un
@@ -530,7 +530,7 @@ def sumar_bloque(facturas, decisiones):
 
 def escribir_bloque(ws, fila, titulo, sumas, con_retencion):
     """Piso 12A: escribe solo la ESTRUCTURA (etiquetas, tipos de IVA
-    presentes) -- las celdas de Base/Quota/Total/Σ RETENCIONS quedan en
+    presentes) -- las celdas de Base/Quota/Total/TOTAL RETENCIONS quedan en
     blanco, se rellenan mas tarde con formulas en escribir_formulas_bloque
     una vez se conoce el rango de filas de DETALL. Devuelve (fila,
     info) -- info trae la posicion de cada celda que hay que rellenar."""
@@ -572,7 +572,7 @@ def escribir_bloque(ws, fila, titulo, sumas, con_retencion):
     if con_retencion:
         for col in range(1, 5):
             ws.cell(row=fila, column=col).border = BORDE_SUPERIOR
-        ws.cell(row=fila, column=1, value="Σ RETENCIONS").font = ESTILO_ENCABEZADO
+        ws.cell(row=fila, column=1, value="TOTAL RETENCIONS").font = ESTILO_ENCABEZADO
         celda = ws.cell(row=fila, column=4)
         celda.font = ESTILO_ENCABEZADO
         celda.number_format = FORMATO_MONEDA
@@ -675,7 +675,7 @@ def escribir_resultat_estructura(ws, fila, sumas_g, sumas_i):
 
     for col in range(1, 4):
         ws.cell(row=fila, column=col).border = BORDE_SUPERIOR
-    ws.cell(row=fila, column=1, value="RESULTAT IVA (repercutit − suportat)").font = ESTILO_ENCABEZADO
+    ws.cell(row=fila, column=1, value="RESULTAT IVA (repercutit - suportat)").font = ESTILO_ENCABEZADO
     ws.cell(row=fila, column=3).font = ESTILO_ENCABEZADO
     ws.cell(row=fila, column=3).number_format = FORMATO_MONEDA
     fila_resultat = fila
@@ -778,7 +778,7 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
         estado_mostrado = f"DESCARTAT ({decision.get('nota', '')})"
         relleno = RELLENO_DESCARTAT
     elif decision and decision.get("accion") == "aprovar":
-        estado_mostrado = f"OK ★ (aprovat manualment per {decision.get('qui', '')}, {decision.get('data', '')})"
+        estado_mostrado = f"OK (aprovat manualment per {decision.get('qui', '')}, {decision.get('data', '')})"
         relleno = RELLENO_OK
     else:
         estado_mostrado = estado
@@ -787,14 +787,14 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     if es_abonament:
         estado_mostrado += " (ABONAMENT)"
     if tiene_avisos:
-        estado_mostrado += " ⚠"
+        estado_mostrado += " [AVÍS]"
 
     # Piso 11B: distintiu "corregit" -- mismo patron aditivo que
-    # ABONAMENT/⚠. camps_corregits lo escribe validar.py (cirugia
+    # ABONAMENT/[AVÍS]. camps_corregits lo escribe validar.py (cirugia
     # minima alli); aqui solo se muestra, ninguna suma cambia.
     camps_corregits = datos.get("camps_corregits") or []
     if camps_corregits:
-        detall = "; ".join(f"{c['camp']}: {c['antic']}→{c['nou']}" for c in camps_corregits)
+        detall = "; ".join(f"{c['camp']}: {c['antic']} -> {c['nou']}" for c in camps_corregits)
         estado_mostrado += f" | CORREGIT ({detall})"
 
     ws.cell(row=fila, column=1, value=datos.get("fecha_factura"))
