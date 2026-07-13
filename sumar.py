@@ -80,12 +80,22 @@ reabre el Excel ya guardado, reparsa cada formula con una regex,
 confirma que el rango coincide exactamente con el anotado y recalcula
 en Python el mismo valor a partir de las celdas planas de DETALL,
 comparando al centimo contra lo que sumar_bloque ya calculo en memoria.
+
+Piso 13J: diseccion forense (Piso 13I) encontro la causa real de que
+Excel 2007 pida "reparar" un archivo recien generado -- openpyxl
+escribe toda celda de formula con <v /> vacio (confirmado en su propio
+codigo fuente), y una celda que se declara numerica por defecto con
+valor vacio es lo que el 2007 rechaza al cargar. inyectar_valores_cacheados
+reabre el .xlsx justo despues de guardarlo e injecta ahi el valor que
+el propio codigo ya calculo (el mismo que compara verificar_formulas),
+porque openpyxl no ofrece ninguna forma de escribirlo por su API.
 """
 
 import csv
 import json
 import os
 import re
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -440,6 +450,83 @@ def _leer_rango(ws, columna, ini, fin):
         valor = ws[f"{columna}{f}"].value
         total += valor or 0
     return total
+
+
+def _mapa_hojas_xml(zf):
+    """Piso 13J: averigua a que xl/worksheets/sheetN.xml corresponde
+    cada nombre de hoja visible ("2T", "AVISOS"...). No se puede asumir
+    el orden (sheet1.xml = primera hoja creada): hay que leerlo de
+    verdad de xl/workbook.xml (nombre -> r:id) y xl/_rels/workbook.xml.rels
+    (r:id -> ruta del archivo), que es como el propio Excel lo resuelve.
+    Los atributos de cada etiqueta no siempre vienen en el mismo orden
+    (comprobado en un archivo real), por eso se extraen uno a uno en vez
+    de asumir una posicion fija."""
+    workbook_xml = zf.read("xl/workbook.xml").decode("utf-8")
+    rels_xml = zf.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+
+    rid_a_target = {}
+    for etiqueta in re.findall(r"<Relationship\b[^>]*/>", rels_xml):
+        id_m = re.search(r'Id="([^"]+)"', etiqueta)
+        target_m = re.search(r'Target="([^"]+)"', etiqueta)
+        if id_m and target_m:
+            rid_a_target[id_m.group(1)] = target_m.group(1)
+
+    mapa = {}
+    for etiqueta in re.findall(r"<sheet\b[^>]*/>", workbook_xml):
+        nombre_m = re.search(r'name="([^"]+)"', etiqueta)
+        rid_m = re.search(r'r:id="([^"]+)"', etiqueta)
+        if not (nombre_m and rid_m):
+            continue
+        target = rid_a_target[rid_m.group(1)]
+        # Target puede venir absoluto ("/xl/worksheets/sheet1.xml") o
+        # relativo a xl/ ("worksheets/sheet1.xml") -- visto ambos casos
+        # en el mismo archivo real (rels de hojas vs. de estilos/tema).
+        ruta = target[1:] if target.startswith("/") else f"xl/{target}"
+        mapa[nombre_m.group(1)] = ruta
+    return mapa
+
+
+def inyectar_valores_cacheados(ruta_excel, comprobaciones_por_hoja):
+    """Piso 13J: arregla la causa encontrada en el Piso 13I (dissecio
+    forense) de que Excel 2007 pida "reparar" un archivo recien
+    generado. openpyxl escribe SIEMPRE toda celda de formula como
+    <f>...</f><v /> (v vacio) -- confirmado leyendo su propio codigo
+    fuente (_writer.py) y con una reproduccion minima aislada. El
+    espec ECMA-376 permite omitir <v> del todo (minOccurs="0"), pero
+    dejarlo vacio en una celda que por defecto se declara numerica
+    (el atributo t no se escribe) es lo que Excel 2007 rechaza al
+    cargar -- Excel moderno lo tolera en silencio y recalcula.
+
+    El propio codigo YA sabe el valor exacto de cada formula antes de
+    escribirla (comprobaciones_por_hoja, la misma lista que usa
+    verificar_formulas para comparar al centimo) -- este paso solo
+    inyecta ese numero ya conocido dentro de <v>, reabriendo el .xlsx
+    (un zip) recien guardado. openpyxl no expone ninguna forma de
+    hacerlo por su API publica, asi que se hace directamente sobre el
+    XML ya escrito, y se reescribe el archivo entero (los zip no se
+    editan por partes)."""
+    with zipfile.ZipFile(ruta_excel) as zf:
+        contenidos = {nombre: zf.read(nombre) for nombre in zf.namelist()}
+        mapa_hojas = _mapa_hojas_xml(zf)
+
+    for nombre_hoja, comprobaciones in comprobaciones_por_hoja.items():
+        ruta_hoja = mapa_hojas[nombre_hoja]
+        xml = contenidos[ruta_hoja].decode("utf-8")
+        for comprobacion in comprobaciones:
+            coordenada, valor = comprobacion[0], comprobacion[-1]
+            if valor == 0:
+                valor = 0  # evita "-0.0" si una resta redondea a cero negativo
+            patron = re.compile(r'(<c r="' + re.escape(coordenada) + r'"[^>]*><f>[^<]*</f>)<v\s*/?>(?:</v>)?')
+            xml, n = patron.subn(lambda m: f"{m.group(1)}<v>{valor}</v>", xml, count=1)
+            if n != 1:
+                raise ValueError(f"{nombre_hoja}!{coordenada}: no s'ha trobat la cel·la de fórmula per injectar el valor")
+        contenidos[ruta_hoja] = xml.encode("utf-8")
+
+    ruta_temp = ruta_excel + ".tmp"
+    with zipfile.ZipFile(ruta_temp, "w", zipfile.ZIP_DEFLATED) as zf_out:
+        for nombre, datos in contenidos.items():
+            zf_out.writestr(nombre, datos)
+    os.replace(ruta_temp, ruta_excel)
 
 
 def verificar_formulas(ruta_xlsx, comprobaciones_por_hoja):
@@ -1377,6 +1464,18 @@ for fila_cliente in leer_clientes():
         print(f"AVISO: {carpeta} -- no s'ha pogut escriure {ruta_excel}. Tanca l'Excel del client abans de recalcular.")
         continue
     print(f"Escrito: {ruta_excel}")
+    if comprobaciones_por_hoja:
+        # Piso 13J: mismo motivo que el PermissionError de wb.save() --
+        # reescribe el archivo entero, y en Windows podria estar
+        # bloqueado si alguien lo abrio justo entre el guardado y aqui.
+        try:
+            inyectar_valores_cacheados(ruta_excel, comprobaciones_por_hoja)
+        except PermissionError:
+            print(
+                f"AVISO: {carpeta} -- no s'ha pogut reescriure {ruta_excel} amb els valors "
+                f"calculats (Excel 2007 podria seguir demanant reparar). Tanca l'Excel del "
+                f"client i torna a executar."
+            )
     verificar_enlaces_excel(ruta_excel, carpeta_cliente)
     if comprobaciones_por_hoja:
         n_formulas = verificar_formulas(ruta_excel, comprobaciones_por_hoja)
