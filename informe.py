@@ -252,8 +252,11 @@ def cargar_validadas(carpeta):
 
 def cargar_decisiones(carpeta_cliente):
     """Igual que en sumar.py: lee decisions.csv si existe. Sin
-    archivo, o vacio, devuelve {} -- comportamiento identico al de
-    antes de este piso."""
+    archivo, o vacio, devuelve {}.
+
+    Piso 13M: decisions.csv es llibre major -- l'estat efectiu d'un
+    archiu es la seva ULTIMA fila; si es "revertir", es treu del
+    diccionari (com si mai s'hagues decidit)."""
     ruta = f"{carpeta_cliente}/decisions.csv"
     decisiones = {}
     if not os.path.exists(ruta):
@@ -261,9 +264,35 @@ def cargar_decisiones(carpeta_cliente):
     with open(ruta, encoding="utf-8") as f:
         for fila in csv.DictReader(f):
             archivo = fila.get("archivo")
-            if archivo:
+            if not archivo:
+                continue
+            if fila.get("accion") == "revertir":
+                decisiones.pop(archivo, None)
+            else:
                 decisiones[archivo] = fila
     return decisiones
+
+
+def historial_decisiones(carpeta_cliente, archivo):
+    """Piso 13M: igual que en sumar.py/app.py."""
+    ruta = f"{carpeta_cliente}/decisions.csv"
+    if not os.path.exists(ruta):
+        return []
+    with open(ruta, encoding="utf-8") as f:
+        return [fila for fila in csv.DictReader(f) if fila.get("archivo") == archivo]
+
+
+TRADUCCION_ACCION = {"aprovar": "aprovada", "descartar": "descartada", "revertir": "revertit"}
+
+
+def resumen_historial_decisiones(historial):
+    """Piso 13M: igual que en sumar.py/app.py."""
+    if not any(fila.get("accion") == "revertir" for fila in historial):
+        return None
+    return " — ".join(
+        f"{TRADUCCION_ACCION.get(fila.get('accion'), fila.get('accion'))} per {fila.get('qui')} el {fila.get('data')}"
+        for fila in historial
+    )
 
 
 def trimestre_de(fecha):
@@ -536,6 +565,14 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         )
         corregit_detall_html = f"<p><strong>Correccions aplicades:</strong></p><ul>{items}</ul>"
 
+    # Piso 13M: mateix patro additiu -- nomes si hi ha hagut alguna
+    # decisio revertida (silenciós per a la resta, regla 10).
+    resumen_historial = resumen_historial_decisiones(historial_decisiones(carpeta_cliente, nombre))
+    historial_html = (
+        f'<p class="nota-decisio"><strong>Historial:</strong> {esc(resumen_historial)}</p>'
+        if resumen_historial else ""
+    )
+
     return f"""
     <div class="tarjeta {clase_estado}">
       <div class="tarjeta-izq">
@@ -555,6 +592,7 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         {observaciones_html}
         {nota_decisio_html}
         {corregit_detall_html}
+        {historial_html}
       </div>
       <div class="tarjeta-der">{lado_derecho}</div>
     </div>"""

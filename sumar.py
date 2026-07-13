@@ -297,9 +297,15 @@ def cargar_validadas(carpeta):
 
 def cargar_decisiones(carpeta_cliente):
     """Lee decisions.csv (archivo,accion,nota,qui,data) si existe. Sin
-    archivo, o vacio, devuelve {} -- el comportamiento es identico al
-    de antes de este piso. Solo aplica a facturas ya validadas (los
-    ERROR no tienen ficha, no son aprobables)."""
+    archivo, o vacio, devuelve {}. Solo aplica a facturas ya validadas
+    (los ERROR no tienen ficha, no son aprobables).
+
+    Piso 13M: decisions.csv es llibre major (app.py ja no sobreescriu
+    cap fila, sempre n'afegeix una) -- l'estat efectiu d'un archiu es
+    la seva ULTIMA fila; si es "revertir", es treu del diccionari
+    (com si mai s'hagues decidit). Res mes en aquest fitxer necessita
+    canviar: sumar_bloque/_escribir_fila_detalle ja fan
+    decisiones.get(nombre) i decision.get("accion") == "aprovar"."""
     ruta = f"{carpeta_cliente}/decisions.csv"
     decisiones = {}
     if not os.path.exists(ruta):
@@ -307,9 +313,37 @@ def cargar_decisiones(carpeta_cliente):
     with open(ruta, encoding="utf-8") as f:
         for fila in csv.DictReader(f):
             archivo = fila.get("archivo")
-            if archivo:
+            if not archivo:
+                continue
+            if fila.get("accion") == "revertir":
+                decisiones.pop(archivo, None)
+            else:
                 decisiones[archivo] = fila
     return decisiones
+
+
+def historial_decisiones(carpeta_cliente, archivo):
+    """Piso 13M: igual que en app.py -- totes les files d'aquest
+    archiu a decisions.csv, en ordre cronologic."""
+    ruta = f"{carpeta_cliente}/decisions.csv"
+    if not os.path.exists(ruta):
+        return []
+    with open(ruta, encoding="utf-8") as f:
+        return [fila for fila in csv.DictReader(f) if fila.get("archivo") == archivo]
+
+
+TRADUCCION_ACCION = {"aprovar": "aprovada", "descartar": "descartada", "revertir": "revertit"}
+
+
+def resumen_historial_decisiones(historial):
+    """Piso 13M: igual que en app.py -- text compacte, None si no hi
+    ha cap "revertir" al historial (sense soroll per a la resta)."""
+    if not any(fila.get("accion") == "revertir" for fila in historial):
+        return None
+    return " — ".join(
+        f"{TRADUCCION_ACCION.get(fila.get('accion'), fila.get('accion'))} per {fila.get('qui')} el {fila.get('data')}"
+        for fila in historial
+    )
 
 
 def trimestre_de(fecha):
@@ -936,6 +970,13 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     if camps_corregits:
         detall = "; ".join(f"{c['camp']}: {c['antic']} -> {c['nou']}" for c in camps_corregits)
         estado_mostrado += f" | CORREGIT ({detall})"
+
+    # Piso 13M: mateix patro additiu -- nomes si hi ha hagut alguna
+    # decisio revertida (resumen_historial_decisiones ja torna None
+    # si no, sense soroll per a la resta).
+    resumen_historial = resumen_historial_decisiones(historial_decisiones(carpeta_cliente, nombre))
+    if resumen_historial:
+        estado_mostrado += f" | HISTORIAL: {resumen_historial}"
 
     ws.cell(row=fila, column=1, value=datos.get("fecha_factura"))
     celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))

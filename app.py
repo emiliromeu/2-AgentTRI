@@ -605,7 +605,16 @@ def cargar_validadas(carpeta):
 
 def cargar_decisiones(carpeta_cliente):
     """Igual que en sumar.py/informe.py: lee decisions.csv si existe.
-    Sin archivo, o vacio, devuelve {}."""
+    Sin archivo, o vacio, devuelve {}.
+
+    Piso 13M: decisions.csv ya es llibre major (cada decision es una
+    fila nova, mai una sobreescriptura) -- l'estat EFECTIU d'un
+    archiu es la seva ULTIMA fila. Si aquesta ultima fila es
+    "revertir", NO hi ha decisio efectiva: es treu del diccionari en
+    comptes de deixar-hi la fila "revertir" (aixi "if decision:" i
+    "decision.get('accion') == 'aprovar'" seguixen funcionant igual a
+    sumar.py/informe.py/aqui mateix, sense haver de tocar cap altre
+    lloc que ja les fa servir)."""
     ruta = os.path.join(carpeta_cliente, "decisions.csv")
     decisiones = {}
     if not os.path.exists(ruta):
@@ -613,9 +622,40 @@ def cargar_decisiones(carpeta_cliente):
     with open(ruta, encoding="utf-8") as f:
         for fila in csv.DictReader(f):
             archivo = fila.get("archivo")
-            if archivo:
+            if not archivo:
+                continue
+            if fila.get("accion") == "revertir":
+                decisiones.pop(archivo, None)
+            else:
                 decisiones[archivo] = fila
     return decisiones
+
+
+def historial_decisiones(carpeta_cliente, archivo):
+    """Piso 13M: totes les files d'aquest archiu a decisions.csv, en
+    ordre cronologic (inclou aprovar/descartar/revertir) -- per a
+    l'auditoria completa (badge de "desfet N vegades", historial
+    compacte a l'Excel/informe)."""
+    ruta = os.path.join(carpeta_cliente, "decisions.csv")
+    if not os.path.exists(ruta):
+        return []
+    with open(ruta, encoding="utf-8") as f:
+        return [fila for fila in csv.DictReader(f) if fila.get("archivo") == archivo]
+
+
+TRADUCCION_ACCION = {"aprovar": "aprovada", "descartar": "descartada", "revertir": "revertit"}
+
+
+def resumen_historial_decisiones(historial):
+    """Piso 13M: text compacte tipus "descartada per X el D — revertit
+    per Y el D2" -- None si no hi ha cap "revertir" (sense soroll per
+    a les fitxes que mai s'han tocat, regla 10)."""
+    if not any(fila.get("accion") == "revertir" for fila in historial):
+        return None
+    return " — ".join(
+        f"{TRADUCCION_ACCION.get(fila.get('accion'), fila.get('accion'))} per {fila.get('qui')} el {fila.get('data')}"
+        for fila in historial
+    )
 
 
 def encontrar_original(carpeta_origen, nombre_json):
@@ -668,32 +708,54 @@ def detectar_errores(rutas_presentes, carpeta_extraidas):
 
 
 def escribir_decision(carpeta_cliente, archivo, accion, nota, qui, data=None):
-    """Piso 11A: primera funcion que ESCRIBE decisions.csv -- hasta
-    ahora sumar.py/informe.py solo lo leian (Piso 9.2, rellenado a mano
-    por Emili). Si ya habia una decision para este archivo, la
-    sustituye -- no se acumulan filas contradictorias del mismo archivo.
+    """Piso 11A: primera funcion que ESCRIBE decisions.csv.
+
+    Piso 13M: decisions.csv es un llibre major -- NOMES CREIX. Abans
+    (Piso 11A) aquesta funcio rellegia tot el fitxer i sobreescrivia
+    la fila anterior d'aquest archivo; ara sempre AFEGEIX una fila
+    nova, mai reescriu ni esborra les que ja hi son. accion admet ara
+    "revertir" a mes d'"aprovar"/"descartar" -- desfer una decisio es
+    una fila mes, no una edicio. L'estat efectiu d'un archiu es la
+    seva ULTIMA fila (cargar_decisiones ho aplica).
 
     Piso 11C: 'data' opcional -- una accion en lote captura UNA marca
     de tiempo antes del bucle y la pasa a cada llamada, para que las
     N filas del mismo lote compartan exactamente la misma data (no
     unos milisegundos distintos cada una)."""
     ruta = os.path.join(carpeta_cliente, "decisions.csv")
-    filas = []
-    if os.path.exists(ruta):
-        with open(ruta, encoding="utf-8") as f:
-            filas = list(csv.DictReader(f))
-    filas = [f for f in filas if f.get("archivo") != archivo]
-    filas.append({
-        "archivo": archivo,
-        "accion": accion,
-        "nota": nota,
-        "qui": qui,
-        "data": data or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    })
-    with open(ruta, "w", newline="", encoding="utf-8") as f:
+    escribir_cabecera = not os.path.exists(ruta)
+    with open(ruta, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CAMPOS_DECISIONS_CSV)
-        writer.writeheader()
-        writer.writerows(filas)
+        if escribir_cabecera:
+            writer.writeheader()
+        writer.writerow({
+            "archivo": archivo,
+            "accion": accion,
+            "nota": nota,
+            "qui": qui,
+            "data": data or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+
+def revertir_decision(carpeta_cliente, archivo, motiu, qui):
+    """Piso 13M: desfa la decisio EFECTIVA d'aquest archiu -- escriu
+    una fila "revertir" nova (mai esborra res). Si ja no hi ha cap
+    decisio efectiva (algu ja l'ha desfet, o mai n'hi va haver cap),
+    NO escriu res i retorna None -- el crider mostra l'error visible
+    (regla 10, i la trampa explicita del Piso 13M: revertir dues
+    vegades seguides ha de quedar bloquejat amb missatge clar, mai en
+    silenci). Si nota queda buida, es genera una referencia llegible
+    a la decisio que es desfa (evita haver d'afegir columnes noves a
+    un csv que ja existeix en clients reals)."""
+    decision_actual = cargar_decisiones(carpeta_cliente).get(archivo)
+    if decision_actual is None:
+        return None
+    nota_final = motiu or (
+        f"Reverteix '{decision_actual.get('accion')}' de {decision_actual.get('qui')} "
+        f"({decision_actual.get('data')})"
+    )
+    escribir_decision(carpeta_cliente, archivo, "revertir", nota_final, qui)
+    return decision_actual
 
 
 def escribir_correccion(carpeta_cliente, archivo, cambios, motiu, qui):
@@ -1016,18 +1078,35 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                         st.image(imagen_pdf)
                 boton_obrir("Obrir original", ruta_original or "", key=f"{prefijo}_original_{nombre}")
 
+        # Piso 13M: el bloc de moviment es INDEPENDENT del de decisio --
+        # una fitxa pot alhora haver estat moguda (historic) i estar
+        # pendent d'una decisio nova al seu flux actual (abans era un
+        # if/elif/else excloent que amagava el formulari si hi havia
+        # moviment). Es llegeix en cada render, mai es confia en
+        # l'estat que va passar el bucle exterior.
         if moviment:
-            # Piso 13L: un cop mogut, Aprovar/Descartar/Moure ja no
-            # tenen sentit fins que es recalculi (la fitxa viu ara a
-            # l'altre flux) -- mateix criteri que decision/camps_corregits:
-            # es llegeix en cada render, mai es confia en l'estat que
-            # va passar el bucle exterior.
             motiu_mostrat = f" — _{moviment.get('motiu')}_" if moviment.get("motiu") else ""
             st.info(
                 f"↔️ Mogut de {moviment.get('de')} a {moviment.get('a')} per {moviment.get('qui')} "
                 f"el {moviment.get('data')}{motiu_mostrat} · Recalcula per refer els veredictes."
             )
-        elif decision:
+            with st.form(key=f"form_tornar_{prefijo}_{nombre}", border=False):
+                motiu_tornar = st.text_input("Motiu (opcional)", key=f"{prefijo}_motiu_tornar_{nombre}")
+                click_tornar = st.form_submit_button(f"Tornar a {moviment.get('de')}")
+            if click_tornar:
+                migrar_lot.moure_de_flux(
+                    os.path.basename(carpeta_cliente), [(nombre_base, moviment.get("a"))],
+                    motiu_tornar or "Moviment individual des de Revisió (tornada)", qui,
+                )
+                st.toast(f"Tornat a {moviment.get('de')}. Recalcula per refer els veredictes.", icon="↩️")
+                st.rerun(scope="fragment")
+
+        historial = historial_decisiones(carpeta_cliente, nombre)
+        n_revertits = sum(1 for f in historial if f.get("accion") == "revertir")
+        if n_revertits:
+            st.caption(f"↩️ Decisió desfeta ({n_revertits} {'vegada' if n_revertits == 1 else 'vegades'})")
+
+        if decision:
             etiqueta_accio = "Aprovada" if decision.get("accion") == "aprovar" else "Descartada"
             nota_mostrada = f" — _{decision.get('nota')}_" if decision.get("nota") else ""
             st.success(f"✓ {etiqueta_accio} per {decision.get('qui')} el {decision.get('data')}{nota_mostrada}")
@@ -1160,6 +1239,49 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
 
         if st.button("Corregir camps", key=f"{prefijo}_obrir_correccio_{nombre}"):
             dialog_corregir_camps()
+
+
+@st.fragment
+def bloque_decidit(archivo, carpeta_cliente, qui):
+    """Piso 13M: "Ja decidits" passa de text pla a poder desfer la
+    decisió -- mateix patró que tarjeta_revisio (fragment, es llegeix
+    tot fresc en cada render, mai es confia en l'estat que va passar
+    el bucle exterior). Si la decisió ja no existeix (algú ja l'ha
+    desfet, o l'ha tornat a decidir), es mostra la confirmació i prou
+    -- la fitxa reapareixerà a Pendents/OK en el proper rerun complet
+    (aquest fragment no reexecuta el bucle exterior)."""
+    decision = cargar_decisiones(carpeta_cliente).get(archivo)
+    historial = historial_decisiones(carpeta_cliente, archivo)
+    n_revertits = sum(1 for f in historial if f.get("accion") == "revertir")
+
+    if decision is None:
+        st.write(
+            f"**{archivo}** — decisió desfeta ({n_revertits} "
+            f"{'vegada' if n_revertits == 1 else 'vegades'}). Recalcula per veure-la al seu lloc."
+        )
+        return
+
+    nota = f" — _{decision.get('nota')}_" if decision.get("nota") else ""
+    st.write(
+        f"**{archivo}** — {decision.get('accion')} per {decision.get('qui')} "
+        f"el {decision.get('data')}{nota}"
+    )
+    if n_revertits:
+        st.caption(f"↩️ Decisió desfeta ({n_revertits} {'vegada' if n_revertits == 1 else 'vegades'}) anteriorment")
+
+    with st.form(key=f"form_desfer_{archivo}", border=False):
+        motiu_desfer = st.text_input("Motiu (opcional)", key=f"desfer_motiu_{archivo}")
+        click_desfer = st.form_submit_button("Desfer aquesta decisió")
+    if click_desfer:
+        # Piso 13M: guàrdia explícita -- revertir_decision ja recomprova
+        # si encara hi ha decisió efectiva just abans d'escriure (evita
+        # una condició de cursa si es clica dues vegades seguides).
+        revertida = revertir_decision(carpeta_cliente, archivo, motiu_desfer, qui)
+        if revertida is None:
+            st.error("No hi ha res a revertir.")
+        else:
+            st.toast(f"Decisió desfeta — {archivo} torna a pendents.", icon="↩️")
+            st.rerun()
 
 
 @st.fragment
@@ -1677,9 +1799,5 @@ elif vista == "Revisió":
         with st.expander(f"Ja decidits ({n_decidits})", key=f"revisio_expander_decidits_{carpeta}"):
             if not estado["decisiones"]:
                 st.caption("Cap decisió encara.")
-            for archivo, decision in estado["decisiones"].items():
-                nota = f" — _{decision.get('nota')}_" if decision.get("nota") else ""
-                st.write(
-                    f"**{archivo}** — {decision.get('accion')} per {decision.get('qui')} "
-                    f"el {decision.get('data')}{nota}"
-                )
+            for archivo in estado["decisiones"]:
+                bloque_decidit(archivo, estado["carpeta_cliente"], qui)
