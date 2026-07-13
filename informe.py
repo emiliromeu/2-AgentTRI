@@ -331,6 +331,20 @@ def cargar_manifiestos(carpeta_lotes_procesados):
     return manifiestos
 
 
+# Piso 13K: igual que en sumar.py -- los dos molls posibles de un lot
+# ja processat (compres i vendes).
+CARPETAS_LOTES_PROCESADOS = ["rebudes/lotes_procesados", "apartados/lotes_vendes_procesados"]
+
+
+def _ruta_lote_procesat(carpeta_cliente, nombre_lote):
+    """Igual que en sumar.py."""
+    for subcarpeta in CARPETAS_LOTES_PROCESADOS:
+        ruta = os.path.join(carpeta_cliente, subcarpeta, nombre_lote)
+        if os.path.exists(ruta):
+            return ruta
+    return None
+
+
 def avisos_consistencia(facturas):
     """Igual que en sumar.py: agrupa por nombre de proveedor (no por
     nif_proveedor, que puede variar por OCR), un aviso por proveedor
@@ -705,8 +719,12 @@ def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_gastos, origen_ingr
         )
         html_apartats = f'<table><thead><tr><th>Fitxer</th><th>Justificació</th></tr></thead><tbody>{filas}</tbody></table>'
 
-    # b) Pagines descartades com a soroll
-    manifiestos = cargar_manifiestos(f"{carpeta_cliente}/rebudes/lotes_procesados")
+    # b) Pagines descartades com a soroll -- Piso 13K: dos molls (compres
+    # i vendes), cap dels dos es pot ometre o el soroll d'un quedaria invisible.
+    manifiestos = (
+        cargar_manifiestos(f"{carpeta_cliente}/rebudes/lotes_procesados")
+        + cargar_manifiestos(f"{carpeta_cliente}/apartados/lotes_vendes_procesados")
+    )
     filas_ruido = [
         (nombre_lote, doc)
         for nombre_lote, documentos in manifiestos
@@ -720,7 +738,7 @@ def seccion_avisos(carpeta_cliente, gastos, ingresos, origen_gastos, origen_ingr
     else:
         filas = ""
         for nombre_lote, doc in filas_ruido:
-            ruta_lote = os.path.join(carpeta_cliente, "rebudes/lotes_procesados", nombre_lote)
+            ruta_lote = _ruta_lote_procesat(carpeta_cliente, nombre_lote) or ""
             lote_html = construir_enllac(ruta_lote, carpeta_cliente, nombre_lote) or esc(nombre_lote)
             filas += f"""<tr><td>{lote_html}</td><td>p{doc['pagina_inicio']}-{doc['pagina_fin']}</td>
                 <td>{esc(doc.get('emisor_pista'))}</td></tr>"""
@@ -917,7 +935,10 @@ for fila_cliente in leer_clientes():
         f for f in os.listdir(carpeta_albarans) if f.lower().endswith(EXTENSIONES_ORIGINAL)
     ]) if os.path.isdir(carpeta_albarans) else 0
 
-    manifiestos_conciliacio = cargar_manifiestos(f"{carpeta_cliente}/rebudes/lotes_procesados")
+    manifiestos_conciliacio = (
+        cargar_manifiestos(f"{carpeta_cliente}/rebudes/lotes_procesados")
+        + cargar_manifiestos(f"{carpeta_cliente}/apartados/lotes_vendes_procesados")
+    )
     n_ruido = sum(
         1 for _, documentos in manifiestos_conciliacio for doc in documentos if doc.get("tipo") == "ruido"
     )

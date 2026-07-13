@@ -1055,6 +1055,22 @@ def cargar_manifiestos(carpeta_lotes_procesados):
     return manifiestos
 
 
+# Piso 13K: els dos molls possibles d'un lot ja processat -- cal provar
+# tots dos perque un manifest de ruido no diu de quin moll venia.
+CARPETAS_LOTES_PROCESADOS = ["rebudes/lotes_procesados", "apartados/lotes_vendes_procesados"]
+
+
+def _ruta_lote_procesat(carpeta_cliente, nombre_lote):
+    """Piso 13K: on sigui que hagi acabat el PDF sencer ja processat
+    (moll de compres o de vendes) -- None si no es troba a cap dels
+    dos (no hauria de passar, pero l'enllaç simplement no es crea)."""
+    for subcarpeta in CARPETAS_LOTES_PROCESADOS:
+        ruta = os.path.join(carpeta_cliente, subcarpeta, nombre_lote)
+        if os.path.exists(ruta):
+            return ruta
+    return None
+
+
 def avisos_consistencia(facturas):
     """Agrupa por nombre de proveedor (no por nif_proveedor: un NIF mal
     leido por OCR varia de una factura a otra del mismo proveedor real,
@@ -1145,7 +1161,13 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
         ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
     fila += 1
 
-    manifiestos = cargar_manifiestos(f"{carpeta_cliente}/rebudes/lotes_procesados")
+    # Piso 13K: dos molls (compres i vendes) tenen cada un el seu propi
+    # lotes_procesados/ -- es llegeixen tots dos perque cap pagina de
+    # soroll quedi invisible nomes per venir del moll de vendes.
+    manifiestos = (
+        cargar_manifiestos(f"{carpeta_cliente}/rebudes/lotes_procesados")
+        + cargar_manifiestos(f"{carpeta_cliente}/apartados/lotes_vendes_procesados")
+    )
     filas_ruido = [
         (nombre_lote, doc)
         for nombre_lote, documentos in manifiestos
@@ -1162,8 +1184,8 @@ def escribir_avisos(ws, fila, carpeta_cliente, gastos, ingresos, origen_gastos, 
     else:
         for nombre_lote, doc in filas_ruido:
             celda = ws.cell(row=fila, column=1, value=nombre_lote)
-            ruta_lote = os.path.join(carpeta_cliente, "rebudes/lotes_procesados", nombre_lote)
-            if os.path.exists(ruta_lote):
+            ruta_lote = _ruta_lote_procesat(carpeta_cliente, nombre_lote)
+            if ruta_lote:
                 asignar_hipervinculo(celda, ruta_lote)
             ws.cell(row=fila, column=2, value=f"p{doc['pagina_inicio']}-{doc['pagina_fin']}")
             ws.cell(row=fila, column=3, value=doc.get("emisor_pista"))

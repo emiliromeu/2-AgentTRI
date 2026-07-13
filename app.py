@@ -226,6 +226,11 @@ def anadir_cliente(nif, nombre, carpeta):
     os.makedirs(ruta_proyecto("clientes", carpeta, "rebudes", "lotes_escaneados"), exist_ok=True)
     os.makedirs(ruta_proyecto("clientes", carpeta, "rebudes", "lotes_procesados"), exist_ok=True)
     os.makedirs(ruta_proyecto("clientes", carpeta, "apartados", "ingressos"), exist_ok=True)
+    # Piso 13K: moll bessó dels dos d'amunt, pero per a lots de VENDES --
+    # abans nomes existia un moll de lots (implicitament de compres), i
+    # un lot de vendes hi acabava barrejat (bug de camp).
+    os.makedirs(ruta_proyecto("clientes", carpeta, "apartados", "lotes_vendes_escaneados"), exist_ok=True)
+    os.makedirs(ruta_proyecto("clientes", carpeta, "apartados", "lotes_vendes_procesados"), exist_ok=True)
 
 
 def contar_archivos_cliente(carpeta):
@@ -300,13 +305,25 @@ def arxivar_cliente(fila):
     return destino, n_archivos
 
 
-def ruta_destino_factures(carpeta, destino):
+def ruta_destino_factures(carpeta, destino, es_lot=False):
+    """Piso 13K: es_lot es un eix INDEPENDENT del flux (Compres/Vendes)
+    -- abans la guardia de lots despistats ignorava quin flux havia
+    triat l'usuari i sempre cridava amb el valor literal "Lot", que
+    aterrava al moll de Compres encara que vinguessis de Vendes (bug
+    confirmat en camp). Ara cada flux te el seu propi moll de lots."""
     if destino == "Compres":
+        if es_lot:
+            return ruta_proyecto("clientes", carpeta, "rebudes", "lotes_escaneados")
         return ruta_proyecto("clientes", carpeta, "rebudes", "entrada")
-    if destino == "Lot":
-        return ruta_proyecto("clientes", carpeta, "rebudes", "lotes_escaneados")
-    origen_ingressos = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
-    return os.path.join(ruta_proyecto("clientes", carpeta), *origen_ingressos.split("/"))
+    if destino == "Vendes":
+        if es_lot:
+            return ruta_proyecto("clientes", carpeta, "apartados", "lotes_vendes_escaneados")
+        origen_ingressos = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
+        return os.path.join(ruta_proyecto("clientes", carpeta), *origen_ingressos.split("/"))
+    # destino == "Lot": triat directament al radio (sense passar per la
+    # guardia de Compres/Vendes) -- comportament historic, sempre
+    # compres, perque aqui no hi ha manera de saber quin flux volia.
+    return ruta_proyecto("clientes", carpeta, "rebudes", "lotes_escaneados")
 
 
 def guardar_archivo(archivo_subido, carpeta_destino):
@@ -1264,7 +1281,10 @@ elif vista == "Afegir factures":
             with col_no:
                 confirmar_solta = st.button("No, és una factura llarga", key="lot_descartar")
             if confirmar_lot:
-                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, "Lot"))
+                # Piso 13K: abans "Lot" literal, ignorant el flux triat --
+                # ara respecta destino (Compres/Vendes) i nomes marca
+                # es_lot=True per triar el moll corresponent.
+                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino, es_lot=True))
             elif confirmar_solta:
                 guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino))
         else:

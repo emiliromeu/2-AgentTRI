@@ -46,6 +46,19 @@ DESTINO_POR_TIPO = {
     "liquidacion_ingreso": "apartados/ingressos",
 }
 
+# Piso 13K: moll bessó per a lots de VENDES (abans nomes existia el de
+# compres -- un lot de vendes hi acabava barrejat, bug confirmat en
+# camp). Aqui el "correu rebut" no te sentit: son copies escanejades
+# de documents que EL PROPI CLIENT ha emes, per aixo el vocabulari de
+# tipus es mes curt (sense albara/liquidacio_ingreso, que nomes tenen
+# sentit com a correspondencia rebuda) i el prompt es diferent.
+TIPOS_VALIDOS_VENDES = {"factura", "abono", "ruido"}
+
+# Mateixa convencio duplicada que a app.py/sumar.py/extraer_todas.py/
+# informe.py (cap maquina es importable) -- si "Vendes" ho ignores,
+# els arxius de Davinstal caurien on extraer_todas.py no els mira mai.
+RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS = {"davinstal": "Emeses/davinstal"}
+
 
 def leer_clientes():
     with open("clientes/clientes.csv", encoding="utf-8") as f:
@@ -97,6 +110,36 @@ Reglas de clasificacion:
 """
 
 
+def construir_prompt_vendes(nombre_cliente, nif_cliente):
+    """Piso 13K: mismo contrato de JSON que construir_prompt, pero el
+    lote no es correspondencia recibida -- son copias escaneadas de
+    facturas/abonos que {nombre_cliente} ha EMITIDO a sus propios
+    clientes, asi que emisor_pista pasa a significar el destinatario
+    (a quien se le vendio), no el proveedor."""
+    return f"""Este PDF es un lote escaneado de copias de facturas/abonos
+EMITIDOS (de venda) por {nombre_cliente} (NIF {nif_cliente}) a sus propios
+clientes -- no es correspondencia recibida, son documentos que
+{nombre_cliente} ha generado y guardado escaneados. Devuelve UNICAMENTE
+este JSON, sin texto antes ni despues, sin bloques de markdown:
+
+{{
+  "documentos": [
+    {{"tipo": "factura", "pagina_inicio": 1, "pagina_fin": 2, "emisor_pista": "..."}}
+  ]
+}}
+
+Tipos validos: factura, abono, ruido.
+
+Reglas de clasificacion:
+- Las paginas de este PDF se numeran empezando en 1.
+- Cada pagina pertenece a EXACTAMENTE un documento: no dejes huecos ni la repitas en dos documentos.
+- pagina_inicio y pagina_fin son inclusivos.
+- ruido: paginas en blanco, separadores, o cualquier pagina que no sea una factura/abono.
+- abono: facturas rectificativas o notas de abono EMITIDAS por {nombre_cliente}.
+- emisor_pista: nombre del client/comprador al que se le emitio el documento (el destinatario, NO {nombre_cliente}). Si no se distingue, usa "desconocido".
+"""
+
+
 def pedir_manifiesto(pdf_bytes, prompt):
     pdf_base64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
     respuesta = cliente.messages.create(
@@ -137,18 +180,20 @@ def nombre_seguro(texto):
 
 # --- bucle principal ---
 
-lotes_procesados_ok = 0
-lotes_saltados = 0
-lotes_con_error = 0
-contador_tipos = {t: 0 for t in TIPOS_VALIDOS}
 
-for fila in leer_clientes():
-    carpeta = fila["carpeta"]
-    ruta_lotes = f"clientes/{carpeta}/rebudes/lotes_escaneados"
+def procesar_flujo_lotes(carpeta, nombre_cliente, nif_cliente, ruta_lotes, ruta_procesados,
+                          construir_prompt_fn, tipos_validos, destino_por_tipo):
+    """Piso 13K: cos comu als dos molls (compres i vendes) -- abans
+    nomes existia el de compres, escrit inline al bucle principal.
+    Es parametritza amb el prompt, els tipus valids i el mapa de
+    destins de cada flux perque la logica de trossejar/validar/desar
+    (identica als dos) no es dupliqui. Retorna (ok, saltados, con_error,
+    contador_tipos) d'aquest moll nomes -- el bucle principal ho suma."""
+    ok = saltados = con_error = 0
+    contador_tipos = {}
+
     if not os.path.isdir(ruta_lotes):
-        continue
-
-    ruta_procesados = f"clientes/{carpeta}/rebudes/lotes_procesados"
+        return ok, saltados, con_error, contador_tipos
     os.makedirs(ruta_procesados, exist_ok=True)
 
     nombres_lote = sorted(
@@ -162,13 +207,13 @@ for fila in leer_clientes():
 
         if os.path.exists(ruta_destino_procesado):
             print(f"saltado: {nombre_lote}")
-            lotes_saltados += 1
+            saltados += 1
             continue
 
         try:
             reader = PdfReader(ruta_lote)
             total_paginas = len(reader.pages)
-            prompt = construir_prompt(fila["nombre"], fila["nif"])
+            prompt = construir_prompt_fn(nombre_cliente, nif_cliente)
             peso = os.path.getsize(ruta_lote)
 
             if peso > LIMITE_BYTES:
@@ -200,7 +245,7 @@ for fila in leer_clientes():
             dueno = [None] * (total_paginas + 1)  # indice 1..total_paginas
             errores = []
             for doc in documentos:
-                if doc.get("tipo") not in TIPOS_VALIDOS:
+                if doc.get("tipo") not in tipos_validos:
                     errores.append(f"tipo desconocido '{doc.get('tipo')}' en páginas {doc.get('pagina_inicio')}-{doc.get('pagina_fin')}")
                     continue
                 for p in range(doc["pagina_inicio"], doc["pagina_fin"] + 1):
@@ -217,19 +262,19 @@ for fila in leer_clientes():
 
             if errores:
                 print(f"AVISO: manifiesto inválido en {nombre_lote}: {'; '.join(errores)}")
-                lotes_con_error += 1
+                con_error += 1
                 continue
 
             # Cortar cada documento clasificado a su carpeta de destino
             for doc in documentos:
                 tipo = doc["tipo"]
-                contador_tipos[tipo] += 1
+                contador_tipos[tipo] = contador_tipos.get(tipo, 0) + 1
 
                 if tipo == "ruido":
                     print(f"ruido: {nombre_lote} p{doc['pagina_inicio']}-{doc['pagina_fin']}")
                     continue
 
-                carpeta_destino = f"clientes/{carpeta}/{DESTINO_POR_TIPO[tipo]}"
+                carpeta_destino = f"clientes/{carpeta}/{destino_por_tipo[tipo]}"
                 os.makedirs(carpeta_destino, exist_ok=True)
 
                 emisor = nombre_seguro(doc.get("emisor_pista") or "desconocido")
@@ -247,11 +292,48 @@ for fila in leer_clientes():
 
             os.rename(ruta_lote, ruta_destino_procesado)
             print(f"procesado: {nombre_lote}")
-            lotes_procesados_ok += 1
+            ok += 1
 
         except Exception as e:
             print(f"AVISO: error procesando {nombre_lote}: {e}")
-            lotes_con_error += 1
+            con_error += 1
+
+    return ok, saltados, con_error, contador_tipos
+
+
+lotes_procesados_ok = 0
+lotes_saltados = 0
+lotes_con_error = 0
+contador_tipos = {t: 0 for t in TIPOS_VALIDOS | TIPOS_VALIDOS_VENDES}
+
+for fila in leer_clientes():
+    carpeta = fila["carpeta"]
+    origen_ingressos = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
+
+    resultados_flujos = [
+        procesar_flujo_lotes(
+            carpeta, fila["nombre"], fila["nif"],
+            f"clientes/{carpeta}/rebudes/lotes_escaneados",
+            f"clientes/{carpeta}/rebudes/lotes_procesados",
+            construir_prompt, TIPOS_VALIDOS, DESTINO_POR_TIPO,
+        ),
+        # Piso 13K: moll bessó de vendes -- factura/abono van a
+        # l'origen d'ingressos d'aquest client (personalitzat per a
+        # davinstal, com qualsevol Vendes solta).
+        procesar_flujo_lotes(
+            carpeta, fila["nombre"], fila["nif"],
+            f"clientes/{carpeta}/apartados/lotes_vendes_escaneados",
+            f"clientes/{carpeta}/apartados/lotes_vendes_procesados",
+            construir_prompt_vendes, TIPOS_VALIDOS_VENDES,
+            {"factura": origen_ingressos, "abono": origen_ingressos},
+        ),
+    ]
+    for ok, saltados, con_error, tipos_flujo in resultados_flujos:
+        lotes_procesados_ok += ok
+        lotes_saltados += saltados
+        lotes_con_error += con_error
+        for tipo, n in tipos_flujo.items():
+            contador_tipos[tipo] = contador_tipos.get(tipo, 0) + n
 
 print(f"\nResumen: {lotes_procesados_ok} lotes procesados, {lotes_saltados} saltados, {lotes_con_error} con error")
 print(f"Documentos cortados por tipo: {contador_tipos}")
