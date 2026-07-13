@@ -94,6 +94,7 @@ import csv
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -127,6 +128,11 @@ DESTINOS_AFEGIR = {
     "Vendes": "Vendes",
     "Lot": "Lot d'escàner (diverses factures en un sol PDF)",
 }
+
+# Piso 13J: quan es tria "Lot" directament (sense passar per la guardia
+# de Compres/Vendes), cal preguntar quin flux es -- tradueix la tria
+# cap al mateix vocabulari intern que ja fa servir ruta_destino_factures.
+DESTI_LOT_DIRECTE = {"Compres": "Compres", "Vendes (emeses)": "Vendes"}
 
 # Igual que en extraer_todas.py/sumar.py/informe.py -- convencion duplicada
 # a proposito (ninguna maquina es importable). Si "Vendes" ignorase esto,
@@ -169,8 +175,15 @@ def validar_nif(nif):
     return None
 
 
+PATRON_NIF_UE = re.compile(r"^ES([0-9A-Z]{9})$")
+
+
 def normalizar_nif(nif):
-    return "".join(c for c in (nif or "") if c.isalnum()).upper()
+    """Piso 13J: mateix criteri que validar.py -- treu el prefix
+    intracomunitari "ES" davant d'un NIF/CIF domestic de 9 caracters."""
+    n = "".join(c for c in (nif or "") if c.isalnum()).upper()
+    m = PATRON_NIF_UE.match(n)
+    return m.group(1) if m else n
 
 
 def slug(texto):
@@ -1254,11 +1267,25 @@ elif vista == "Afegir factures":
             "trocejarà automàticament en processar."
         )
 
+        # Piso 13J: "Lot d'escaner" triat DIRECTAMENT (sense passar per la
+        # guardia de mes avall) abans assumia sempre Compres en silenci --
+        # bug real de camp (~70 factures emeses processades com a compres).
+        # Bloquejant (regla 10): sense triar-ho, no es pot ni pujar el PDF.
+        tipus_lot = None
+        if destino == "Lot":
+            tipus_lot = st.radio(
+                "Aquest lot és de...", list(DESTI_LOT_DIRECTE.keys()),
+                index=None, horizontal=True, key="tipus_lot_directe",
+            )
+            if tipus_lot is None:
+                st.info("Selecciona si el lot és de compres o de vendes abans de pujar el PDF.")
+
         tipos_permitidos = ["pdf"] if destino == "Lot" else EXTENSIONES_PERMITIDAS
         archivos = st.file_uploader(
             "Arrossega els arxius aquí",
             type=tipos_permitidos,
             accept_multiple_files=True,
+            disabled=(destino == "Lot" and tipus_lot is None),
         )
 
         # Piso 13D: guardia de lots despistats -- nomes te sentit si
@@ -1292,8 +1319,15 @@ elif vista == "Afegir factures":
             elif confirmar_solta:
                 guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino))
         else:
-            if st.button("Desar arxius", disabled=not archivos, type="primary"):
-                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino))
+            # Piso 13J: si destino == "Lot", el flux real es el triat a
+            # tipus_lot (traduit amb DESTI_LOT_DIRECTE), no el literal "Lot".
+            destino_efectiu = DESTI_LOT_DIRECTE.get(tipus_lot) if destino == "Lot" else destino
+            if st.button(
+                "Desar arxius",
+                disabled=not archivos or (destino == "Lot" and tipus_lot is None),
+                type="primary",
+            ):
+                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino_efectiu, es_lot=(destino == "Lot")))
 
 # ----------------------------------------------------------------------
 elif vista == "Processar":

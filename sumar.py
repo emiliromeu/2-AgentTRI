@@ -95,6 +95,16 @@ ser la contrapart que ya calcula validar.py -- en DESPESES sigue
 diciendose "Proveïdor" (da lo mismo que antes, el cliente ahi es
 siempre receptor); en INGRESSOS pasa a decir "Client" y muestra el
 comprador real, no el propio cliente cuando el es quien emite.
+
+Piso 13J: bug encontrado verificando migrar_lot.py -- origen_ingressos
+ya lleva carpeta_cliente incluido (donde se define, mas arriba en el
+bucle principal), pero se volvia a anteponer otra vez en pendientes/
+descartados/DETALL INGRESSOS, rompiendo la ruta para encontrar_original.
+No era solo un caso latente (ingres PENDENT/DESCARTAT): afectaba a
+CUALQUIER hyperlink de "Núm. factura" en DETALL INGRESSOS de CUALQUIER
+cliente -- confirmado al arreglarlo, el numero de enllaços verificats
+subio de golpe en todos los clientes con ingressos (antes esas celdas
+nunca tenian enllaç, en silenci, des de sempre).
 """
 
 import csv
@@ -1441,7 +1451,13 @@ for fila_cliente in leer_clientes():
         for nombre, datos in revisar_g:
             pendientes.append((nombre, datos, "DESPESA", f"{carpeta_cliente}/rebudes"))
         for nombre, datos in revisar_i:
-            pendientes.append((nombre, datos, "INGRÉS", f"{carpeta_cliente}/{origen_ingressos}"))
+            # Piso 13J: origen_ingressos YA porta carpeta_cliente (linea de
+            # mas abajo donde se define) -- prependerlo otra vez rompia
+            # encontrar_original para cualquier ingres PENDENT de un client
+            # amb origen personalitzat (nomes davinstal fins ara). Bug latent
+            # descobert en verificar migrar_lot.py -- mai havia passat en
+            # producció perque tots els ingressos de davinstal eren OK.
+            pendientes.append((nombre, datos, "INGRÉS", origen_ingressos))
 
         # 2a pasada: PENDENT DE REVISIÓ y DESCARTATS, igual que siempre.
         if pendientes:
@@ -1450,7 +1466,7 @@ for fila_cliente in leer_clientes():
         for nombre, datos, decision in descartados_g:
             descartados_totales.append((nombre, datos, "DESPESA", f"{carpeta_cliente}/rebudes", decision))
         for nombre, datos, decision in descartados_i:
-            descartados_totales.append((nombre, datos, "INGRÉS", f"{carpeta_cliente}/{origen_ingressos}", decision))
+            descartados_totales.append((nombre, datos, "INGRÉS", origen_ingressos, decision))
 
         if descartados_totales:
             fila = escribir_descartados(ws, fila, descartados_totales, carpeta_cliente)
@@ -1465,7 +1481,7 @@ for fila_cliente in leer_clientes():
             )
             fila, rango_i = escribir_detalle(
                 ws, fila, "DETALL INGRESSOS", datos_trimestre["ingresos"],
-                f"{carpeta_cliente}/{origen_ingressos}", carpeta_cliente, decisiones,
+                origen_ingressos, carpeta_cliente, decisiones,
             )
 
             comprobaciones = []

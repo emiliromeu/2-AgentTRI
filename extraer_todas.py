@@ -21,6 +21,12 @@ siempre emisor/destinatario, nunca se intercambian aunque el
 documento sea una venta del propio cliente. Blindaje a futuro, no
 se re-extrae nada existente (las fichas ya extraidas se resuelven
 por NIF en validar.py).
+
+Piso 13J: regla explicita para num_factura -- captar el numero
+COMPLETO con su serie/prefijo, nunca solo el numero suelto (una
+causa real de falsos duplicados era comparar "14" contra "14" cuando
+en realidad eran "Serie A-14" y "Serie B-14"). Blindaje a futuro,
+sin re-extraer nada.
 """
 
 import base64
@@ -127,6 +133,7 @@ Reglas:
 - Si el documento es un abono o factura rectificativa, conserva bases, cuotas y total en NEGATIVO.
 - observaciones es texto libre para anotar cualquier cosa rara en la factura.
 - proveedor = quien EMITE la factura (aparece en la cabecera/logo como emisor). receptor = a quien va dirigida (el destinatario). Esto es SIEMPRE así, incluso si el documento es una venta hecha por el propio cliente de esta gestoria (él sería el proveedor/emisor, su comprador el receptor). Nunca los intercambies aunque el documento sea una venta.
+- num_factura: el número COMPLETO de la factura, incluyendo cualquier serie o prefijo que aparezca (ej. si la factura indica "Serie A - 14" o "2026/A-14", el campo debe ser ese texto completo, no solo "14").
 """
 
 # (etiqueta, carpeta origen, carpeta destino) -- mismo esquema y mismas reglas

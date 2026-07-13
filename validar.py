@@ -35,6 +35,14 @@ validacion NO cambia -- contrapart_nom/contrapart_nif: la parte cuyo
 NIF NO es el del cliente, calculada por NIF, no por posicion del
 campo. Si las dos partes fueran el cliente, motivo nuevo "las dos
 partes son el cliente" (REVISAR).
+
+Piso 13J: normalizar_nif tambien quita el prefijo intracomunitario
+"ES" (ej. "ES37266020V" == "37266020V") antes de comparar -- causaba
+PENDENTS falsos de identidad cuando una factura trae el NIF en
+formato UE. El xec de duplicados (nif_proveedor, num_factura) ya no
+cuenta una factura con num_factura ausente -- antes bastaba que
+coincidiera el proveedor para marcar "duplicada" encima del motivo
+real de campo vacio.
 """
 
 import csv
@@ -61,13 +69,22 @@ def leer_clientes():
         return list(csv.DictReader(f))
 
 
+PATRON_NIF_UE = re.compile(r"^ES([0-9A-Z]{9})$")
+
+
 def normalizar_nif(nif):
     """Quita guiones/espacios y pasa a mayúsculas, para que un NIF con
     formato distinto (ej. "37266020-V" vs "37266020V") no dispare un
-    motivo falso."""
+    motivo falso. Piso 13J: tambien quita el prefijo "ES" del formato
+    intracomunitario (ej. "ES37266020V") si va delante de un NIF/CIF
+    domestico de 9 caracteres -- un CIF domestico normal tiene 9
+    caracteres exactos, nunca 11, asi que no hay riesgo de falso
+    positivo (ej. "B66515529" se queda intacto)."""
     if nif is None:
         return None
-    return "".join(c for c in nif if c.isalnum()).upper()
+    n = "".join(c for c in nif if c.isalnum()).upper()
+    m = PATRON_NIF_UE.match(n)
+    return m.group(1) if m else n
 
 
 def cargar_correcciones(carpeta_cliente):
@@ -193,13 +210,16 @@ for fila in leer_clientes():
 
         # Entre pasadas -- mapa de (nif_proveedor, num_factura) -> nombres de archivo,
         # para detectar duplicados dentro de este cliente/flujo antes de validar
-        # ninguna factura. (None, None) no cuenta -- dos facturas totalmente
-        # vacías ya caen en REVISAR por sus propios campos, no son "duplicadas".
+        # ninguna factura. Piso 13J: num_factura ausente NUNCA cuenta -- ya
+        # cae en REVISAR por "campo obligatorio vacío" (mas abajo), y si dos
+        # facturas del mismo proveedor tienen las dos num_factura=None,
+        # antes disparaban un "duplicada" falso y redundante encima del
+        # motivo real.
         claves = {}
         for nombre, datos in facturas:
-            clave = (datos.get("nif_proveedor"), datos.get("num_factura"))
-            if clave == (None, None):
+            if datos.get("num_factura") is None:
                 continue
+            clave = (datos.get("nif_proveedor"), datos.get("num_factura"))
             claves.setdefault(clave, []).append(nombre)
 
         # Segunda pasada -- validar cada factura
@@ -250,10 +270,11 @@ for fila in leer_clientes():
                 if not es_receptor and not es_emisor:
                     motivos.append("el cliente no aparece ni como emisor ni como receptor")
 
-            clave = (datos.get("nif_proveedor"), datos.get("num_factura"))
-            otros = [n for n in claves[clave] if n != nombre] if clave != (None, None) else []
-            if otros:
-                motivos.append(f"factura duplicada: mismo proveedor+num_factura que {', '.join(otros)}")
+            if datos.get("num_factura") is not None:
+                clave = (datos.get("nif_proveedor"), datos.get("num_factura"))
+                otros = [n for n in claves[clave] if n != nombre]
+                if otros:
+                    motivos.append(f"factura duplicada: mismo proveedor+num_factura que {', '.join(otros)}")
 
             # La retención sin columna en el llibre solo es un problema en rebudes
             # (facturas de compra) -- en ingressos (liquidaciones de cooperativa)
