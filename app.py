@@ -323,6 +323,174 @@ def arxivar_cliente(fila):
     return destino, n_archivos
 
 
+# =======================================================================
+# Piso 13N: DESTRUIR -- l'unic verb del projecte que esborra de veritat
+# (os.remove/shutil.rmtree). Fins ara tot movia (arxivar_cliente,
+# retirar_error) o nomes excloia de sumes (decisions.csv). Nomes
+# arriba aqui el que ja esta retirat/descartat o un client ja
+# arxivat -- mai un document viu al flux -- i sempre amb certificat
+# escrit ABANS d'esborrar res.
+# =======================================================================
+
+CAMPOS_REGISTRE_DESTRUCCIONS = ["data", "qui", "client", "detall", "motiu"]
+
+
+def asegurar_gitignore_destruccions():
+    """Mateix patro que asegurar_gitignore_arxivats -- el certificat
+    de l'arrel (clients arxivats sencers) porta dades fiscals reals
+    als noms/motius, mai a git."""
+    ruta_gitignore = ruta_proyecto(".gitignore")
+    lineas = []
+    if os.path.exists(ruta_gitignore):
+        with open(ruta_gitignore, encoding="utf-8") as f:
+            lineas = f.read().splitlines()
+    if "registre_destruccions.csv" not in lineas:
+        with open(ruta_gitignore, "a", encoding="utf-8") as f:
+            f.write("registre_destruccions.csv\n")
+
+
+def escribir_registre_destruccio(ruta_registro, client, detall, motiu, qui):
+    """El certificat -- l'unica empremta que sobreviu a la destruccio.
+    S'escriu SEMPRE abans d'esborrar cap fitxer (si aixo falla, no
+    s'ha destruit encara res). Llibre major: nomes afegeix."""
+    asegurar_gitignore_destruccions()
+    escribir_cabecera = not os.path.exists(ruta_registro)
+    os.makedirs(os.path.dirname(ruta_registro), exist_ok=True)
+    with open(ruta_registro, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CAMPOS_REGISTRE_DESTRUCCIONS)
+        if escribir_cabecera:
+            writer.writeheader()
+        writer.writerow({
+            "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "qui": qui,
+            "client": client,
+            "detall": detall,
+            "motiu": motiu,
+        })
+
+
+def candidatos_destruccio(carpeta):
+    """Piso 13N: les DUES UNIQUES fonts destruibles -- mai un document
+    viu al flux. retirats: errors_retirats/ (sense JSON, l'original
+    tot sol). descartats: fitxes amb decisio EFECTIVA "descartar"
+    (cargar_decisiones ja aplica el llibre major del Piso 13M -- si
+    s'ha revertit el descartar, l'arxiu ja no surt aqui)."""
+    carpeta_cliente = ruta_proyecto("clientes", carpeta)
+
+    retirats = []
+    carpeta_retirats = os.path.join(carpeta_cliente, "errors_retirats")
+    if os.path.isdir(carpeta_retirats):
+        for nombre in sorted(os.listdir(carpeta_retirats)):
+            if nombre == "registre.csv":
+                continue
+            ruta = os.path.join(carpeta_retirats, nombre)
+            if os.path.isfile(ruta):
+                retirats.append({
+                    "tipo": "retirat", "nombre": nombre,
+                    "rutas": [ruta], "num_factura": None,
+                })
+
+    descartats = []
+    decisiones = cargar_decisiones(carpeta_cliente)
+    origen_ingressos_rel = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
+    flujos = [
+        ("rebudes", os.path.join(carpeta_cliente, "rebudes", "validadas"),
+         os.path.join(carpeta_cliente, "rebudes", "extraidas"),
+         os.path.join(carpeta_cliente, "rebudes")),
+        ("ingressos", os.path.join(carpeta_cliente, "apartados", "ingressos_validadas"),
+         os.path.join(carpeta_cliente, "apartados", "ingressos_extraidas"),
+         os.path.join(carpeta_cliente, *origen_ingressos_rel.split("/"))),
+    ]
+    for flujo, carpeta_validadas, carpeta_extraidas, carpeta_origen in flujos:
+        for nombre, datos in cargar_validadas(carpeta_validadas):
+            decision = decisiones.get(nombre)
+            if not (decision and decision.get("accion") == "descartar"):
+                continue
+            rutas = []
+            ruta_original = encontrar_original(carpeta_origen, nombre)
+            if ruta_original:
+                rutas.append(ruta_original)
+            ruta_extraida = os.path.join(carpeta_extraidas, nombre)
+            if os.path.exists(ruta_extraida):
+                rutas.append(ruta_extraida)
+            ruta_validada = os.path.join(carpeta_validadas, nombre)
+            if os.path.exists(ruta_validada):
+                rutas.append(ruta_validada)
+            descartats.append({
+                "tipo": "descartat", "nombre": nombre, "flujo": flujo,
+                "rutas": rutas, "num_factura": datos.get("num_factura"),
+            })
+
+    return retirats, descartats
+
+
+def destruir_documentos(carpeta, items, motiu, qui):
+    """Piso 13N: re-verifica CADA item contra candidatos_destruccio
+    fresc just abans d'actuar -- bloqueig contra condicio de cursa
+    (algu podria haver revertit un descartar en un altre tab mentre
+    aquesta pantalla estava oberta). Els que ja no son destruibles es
+    salten i es reporten -- mai en silenci (regla 4). Escriu el
+    certificat ABANS d'esborrar, despres os.remove de veritat, i deixa
+    nota permanent a decisions.csv per als descartats (llibre major
+    del Piso 13M -- guanya un tercer valor d'accio, mai reescriu)."""
+    carpeta_cliente = ruta_proyecto("clientes", carpeta)
+    retirats_valids, descartats_valids = candidatos_destruccio(carpeta)
+    valids_per_nom = {r["nombre"]: r for r in retirats_valids}
+    valids_per_nom.update({d["nombre"]: d for d in descartats_valids})
+
+    a_destruir = []
+    omesos = []
+    for item in items:
+        actual = valids_per_nom.get(item["nombre"])
+        if actual is None or actual["tipo"] != item["tipo"]:
+            omesos.append((item["nombre"], "ja no és destruïble (potser algú ha revertit la decisió)"))
+            continue
+        a_destruir.append(actual)
+
+    if not a_destruir:
+        return [], omesos
+
+    detall = "; ".join(
+        f"{it['nombre']} ({it['num_factura']})" if it.get("num_factura") else it["nombre"]
+        for it in a_destruir
+    )
+    ruta_registro = os.path.join(carpeta_cliente, "registre_destruccions.csv")
+    escribir_registre_destruccio(ruta_registro, carpeta, detall, motiu, qui)
+
+    destruits = []
+    data_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for it in a_destruir:
+        for ruta in it["rutas"]:
+            if os.path.exists(ruta):
+                os.remove(ruta)
+        if it["tipo"] == "descartat":
+            escribir_decision(
+                carpeta_cliente, it["nombre"], "destruir",
+                f"Document destruït el {data_actual}: {motiu}", qui,
+            )
+        destruits.append(it["nombre"])
+
+    return destruits, omesos
+
+
+def destruir_client_arxivat(nombre_carpeta_arxivada, motiu, qui):
+    """Piso 13N: nomes clients ja arxivats (arxivats/<carpeta>_<data>/)
+    -- un client actiu primer s'arxiva (dues portes, mai una). El
+    certificat viu a l'arrel (ja no hi haura clientes/<carpeta>/ per
+    escriure-hi res un cop fet el rmtree)."""
+    carpeta_arxivats = ruta_proyecto("arxivats")
+    ruta_origen = os.path.join(carpeta_arxivats, nombre_carpeta_arxivada)
+    if not os.path.isdir(ruta_origen):
+        raise RuntimeError(f"'{ruta_origen}' no existeix -- aturat, no s'ha esborrat res.")
+
+    n_archivos = sum(len(archivos) for _, _, archivos in os.walk(ruta_origen))
+    detall = f"Client arxivat sencer ({nombre_carpeta_arxivada}): {n_archivos} arxius"
+    ruta_registro = ruta_proyecto("registre_destruccions.csv")
+    escribir_registre_destruccio(ruta_registro, nombre_carpeta_arxivada, detall, motiu, qui)
+
+    shutil.rmtree(ruta_origen)
+
+
 def ruta_destino_factures(carpeta, destino, es_lot=False):
     """Piso 13K: es_lot es un eix INDEPENDENT del flux (Compres/Vendes)
     -- abans la guardia de lots despistats ignorava quin flux havia
@@ -1346,6 +1514,16 @@ h1, h2, h3 {
     background: #FFC7CE !important;
     border-color: #e2929c !important;
 }
+/* Piso 13N: el boto final de DESTRUIR -- vermell perque es l'unic
+   verb del projecte que esborra de veritat, i mai type="primary"
+   (no ha de ser el boto per defecte de la pantalla, regla del pis).
+   Mai disabled= (regla 10): el clic sempre es processa i valida amb
+   st.error visible, per aixo nomes cal l'estil actiu. */
+[class*="st-key-destruir_boto"] button {
+    background-color: #b91c1c !important;
+    border-color: #b91c1c !important;
+    color: white !important;
+}
 </style>
 """
 
@@ -1404,7 +1582,7 @@ if "log_proces" not in st.session_state:
     st.session_state["log_proces"] = None
 
 st.title("Agent TRIMESTRE")
-vista = st.sidebar.radio("Navegació", ["Clients", "Afegir factures", "Processar", "Revisió"])
+vista = st.sidebar.radio("Navegació", ["Clients", "Afegir factures", "Processar", "Revisió", "Manteniment"])
 
 # ----------------------------------------------------------------------
 if vista == "Clients":
@@ -1801,3 +1979,144 @@ elif vista == "Revisió":
                 st.caption("Cap decisió encara.")
             for archivo in estado["decisiones"]:
                 bloque_decidit(archivo, estado["carpeta_cliente"], qui)
+
+# ----------------------------------------------------------------------
+elif vista == "Manteniment":
+    st.header("Manteniment")
+    st.caption(
+        "L'únic lloc del projecte que esborra de veritat -- excloure i retirar "
+        "són el dia a dia; destruir és excepcional, lent i queda certificat. "
+        "Mai res que estigui viu al flux: primer descarta o retira, després destrueix."
+    )
+
+    if not st.session_state.get("qui_manteniment_confirmat"):
+        st.info("Cal indicar qui fa aquest manteniment abans de veure les eines.")
+        with st.form("form_qui_manteniment"):
+            nom_qui_manteniment = st.text_input("Qui fa el manteniment?", key="qui_manteniment_input")
+            entrar_manteniment = st.form_submit_button("Entrar", type="primary")
+        if entrar_manteniment:
+            if not nom_qui_manteniment.strip():
+                st.error("Cal escriure un nom abans de continuar.")
+            else:
+                st.session_state["qui_manteniment_confirmat"] = nom_qui_manteniment.strip()
+                st.rerun()
+        st.stop()
+    else:
+        qui_m = st.session_state["qui_manteniment_confirmat"]
+        col_qui_m, col_canviar_m = st.columns([4, 1])
+        with col_qui_m:
+            st.caption(f"Fent manteniment com: **{qui_m}**")
+        with col_canviar_m:
+            if st.button("Canviar qui fa manteniment", key="qui_manteniment_canviar"):
+                st.session_state["qui_manteniment_confirmat"] = None
+                st.rerun()
+
+        tab_docs, tab_client = st.tabs(["Documents d'un client", "Client arxivat"])
+
+        with tab_docs:
+            clientes_m = leer_clientes()
+            if not clientes_m:
+                st.info("Encara no hi ha cap client donat d'alta.")
+            else:
+                opciones_m = {f"{f['nombre']} ({f['carpeta']})": f["carpeta"] for f in clientes_m}
+                eleccion_m = st.selectbox("Client", list(opciones_m.keys()), key="manteniment_client")
+                carpeta_m = opciones_m[eleccion_m]
+
+                retirats, descartats = candidatos_destruccio(carpeta_m)
+
+                st.subheader(f"Retirats ({len(retirats)})")
+                if not retirats:
+                    st.caption("Cap document retirat.")
+                for r in retirats:
+                    st.checkbox(r["nombre"], key=f"destruir_sel_{carpeta_m}_{r['nombre']}")
+
+                st.subheader(f"Descartats ({len(descartats)})")
+                if not descartats:
+                    st.caption("Cap document descartat.")
+                for d in descartats:
+                    etiqueta = d["nombre"]
+                    if d.get("num_factura"):
+                        etiqueta += f" (factura {d['num_factura']})"
+                    st.checkbox(etiqueta, key=f"destruir_sel_{carpeta_m}_{d['nombre']}")
+
+                seleccionats = [
+                    it for it in (retirats + descartats)
+                    if st.session_state.get(f"destruir_sel_{carpeta_m}_{it['nombre']}")
+                ]
+
+                if seleccionats:
+                    bytes_totals = sum(
+                        os.path.getsize(ruta)
+                        for it in seleccionats for ruta in it["rutas"] if os.path.exists(ruta)
+                    )
+                    st.warning(
+                        f"Es destruiran {len(seleccionats)} documents "
+                        f"({bytes_totals / (1024 * 1024):.2f} MB):\n"
+                        + "\n".join(f"- {it['nombre']}" for it in seleccionats)
+                    )
+                    motiu_destruir = st.text_input("Motiu (obligatori)", key=f"destruir_motiu_{carpeta_m}")
+                    confirmacio_destruir = st.text_input(
+                        'Escriu "DESTRUIR" per confirmar', key=f"destruir_confirmacio_{carpeta_m}"
+                    )
+                    # Piso 13N: MAI disabled= lligat a un text_input solt
+                    # (regla 10 -- "nunca depender de que un text_input
+                    # esté confirmado con Tab/Enter"). El clic SEMPRE es
+                    # processa, mateix patró que Aprovar/Descartar: si
+                    # falta el motiu o la paraula no és exacta, error
+                    # visible i no es destrueix res.
+                    if st.button("DESTRUIR DEFINITIVAMENT", key=f"destruir_boto_{carpeta_m}"):
+                        if not motiu_destruir:
+                            st.error("Cal escriure un motiu per destruir.")
+                        elif confirmacio_destruir != "DESTRUIR":
+                            st.error('Cal escriure exactament "DESTRUIR" per confirmar.')
+                        else:
+                            destruits, omesos = destruir_documentos(carpeta_m, seleccionats, motiu_destruir, qui_m)
+                            if destruits:
+                                st.success(
+                                    f"{len(destruits)} documents destruïts. "
+                                    f"Certificat escrit a clientes/{carpeta_m}/registre_destruccions.csv."
+                                )
+                            if omesos:
+                                st.error(
+                                    "Alguns documents ja no eren destruïbles i s'han saltat: "
+                                    + "; ".join(f"{n} ({m})" for n, m in omesos)
+                                )
+                            st.rerun()
+
+        with tab_client:
+            carpeta_arxivats = ruta_proyecto("arxivats")
+            carpetas_arxivades = sorted(
+                n for n in os.listdir(carpeta_arxivats) if os.path.isdir(os.path.join(carpeta_arxivats, n))
+            ) if os.path.isdir(carpeta_arxivats) else []
+
+            if not carpetas_arxivades:
+                st.info("Cap client arxivat.")
+            else:
+                eleccion_arx = st.selectbox("Client arxivat", carpetas_arxivades, key="manteniment_arxivat")
+                ruta_arx = os.path.join(carpeta_arxivats, eleccion_arx)
+                n_archivos_arx = sum(len(archivos) for _, _, archivos in os.walk(ruta_arx))
+                bytes_arx = sum(
+                    os.path.getsize(os.path.join(dirpath, f))
+                    for dirpath, _, archivos in os.walk(ruta_arx) for f in archivos
+                )
+                st.warning(
+                    f"Es destruirà TOT el client arxivat '{eleccion_arx}': "
+                    f"{n_archivos_arx} arxius ({bytes_arx / (1024 * 1024):.2f} MB)."
+                )
+                motiu_arx = st.text_input("Motiu (obligatori)", key="destruir_motiu_arxivat")
+                confirmacio_arx = st.text_input('Escriu "DESTRUIR" per confirmar', key="destruir_confirmacio_arxivat")
+                # Piso 13N: mateix criteri que a l'altra pestanya -- mai
+                # disabled= lligat a un text_input solt (regla 10).
+                if st.button("DESTRUIR DEFINITIVAMENT", key="destruir_boto_arxivat"):
+                    if not motiu_arx:
+                        st.error("Cal escriure un motiu per destruir.")
+                    elif confirmacio_arx != "DESTRUIR":
+                        st.error('Cal escriure exactament "DESTRUIR" per confirmar.')
+                    else:
+                        try:
+                            destruir_client_arxivat(eleccion_arx, motiu_arx, qui_m)
+                        except RuntimeError as e:
+                            st.error(str(e))
+                        else:
+                            st.success(f"Client arxivat '{eleccion_arx}' destruït. Certificat a l'arrel del projecte.")
+                            st.rerun()

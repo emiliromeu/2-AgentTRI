@@ -4,3 +4,4 @@ clientes/
 __pycache__/
 .DS_Store
 arxivats/
+registre_destruccions.csv
