@@ -15,6 +15,12 @@ Piso 6B: el origen de cada flujo puede personalizarse por cliente
 (RUTAS_ORIGEN_PERSONALIZADAS), para clientes con carpetas ya
 organizadas antes de este pipeline. El flujo rebudes tambien lee
 subcarpetas por proveedor, no solo entrada/ (listar_archivos_rebudes).
+
+Piso 13K: regla explicita en el prompt -- proveedor/receptor son
+siempre emisor/destinatario, nunca se intercambian aunque el
+documento sea una venta del propio cliente. Blindaje a futuro, no
+se re-extrae nada existente (las fichas ya extraidas se resuelven
+por NIF en validar.py).
 """
 
 import base64
@@ -120,6 +126,7 @@ Reglas:
 - El campo total es SIEMPRE el total de la factura: suma de bases más cuotas de IVA. NUNCA el líquido a percibir tras retenciones (llamado total acompte, líquido, o a percibir). La retención va exclusivamente en retencion_pct y retencion_cuota — jamás como línea de IVA, jamás descontada del total ni de las bases.
 - Si el documento es un abono o factura rectificativa, conserva bases, cuotas y total en NEGATIVO.
 - observaciones es texto libre para anotar cualquier cosa rara en la factura.
+- proveedor = quien EMITE la factura (aparece en la cabecera/logo como emisor). receptor = a quien va dirigida (el destinatario). Esto es SIEMPRE así, incluso si el documento es una venta hecha por el propio cliente de esta gestoria (él sería el proveedor/emisor, su comprador el receptor). Nunca los intercambies aunque el documento sea una venta.
 """
 
 # (etiqueta, carpeta origen, carpeta destino) -- mismo esquema y mismas reglas

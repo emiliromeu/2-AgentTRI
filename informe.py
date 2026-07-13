@@ -52,6 +52,11 @@ Piso 11B: distintiu "Corregit" (mateix patro additiu que ABONAMENT o
 "aprovat manualment") -- si la fitxa te camps_corregits (escrit per
 validar.py, Piso 11B), es mostra el badge i el detall antic->nou. Cap
 suma ni logica canvia aqui, nomes presentacio del que ja ve calculat.
+
+Piso 13K: la targeta mostra contrapart_nom/contrapart_nif (calculats
+per validar.py per NIF), no "proveedor"/"nif_proveedor" a seques --
+en ingressos on el client es l'emissor (factura propia), abans
+sortia el propi client en comptes del seu comprador.
 """
 
 import base64
@@ -107,6 +112,7 @@ TRADUCCIONES_MOTIVO = [
      "retenció amb quota > 0: el llibre no té columna per representar-la"),
     ("el cliente no aparece ni como emisor ni como receptor",
      "el client no apareix ni com a emissor ni com a receptor"),
+    ("las dos partes son el cliente", "les dues parts són el client"),
 ]
 
 
@@ -539,8 +545,8 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         {avisos_html}
         {decisio_html}
         {corregit_html}
-        <h3>{esc(datos.get("proveedor"))}</h3>
-        <p>NIF: {esc(datos.get("nif_proveedor"))} · Factura: {esc(datos.get("num_factura"))} · Data: {esc(datos.get("fecha_factura"))}</p>
+        <h3>{esc(datos.get("contrapart_nom"))}</h3>
+        <p>NIF: {esc(datos.get("contrapart_nif"))} · Factura: {esc(datos.get("num_factura"))} · Data: {esc(datos.get("fecha_factura"))}</p>
         <ul class="lineas-iva">{lineas_html}</ul>
         <p>Total: {esc(datos.get("total"))} €</p>
         {retencion_html}

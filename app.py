@@ -506,6 +506,7 @@ TRADUCCIONES_MOTIVO = [
      "retenció amb quota > 0: el llibre no té columna per representar-la"),
     ("el cliente no aparece ni como emisor ni como receptor",
      "el client no apareix ni com a emissor ni com a receptor"),
+    ("las dos partes son el cliente", "les dues parts són el client"),
 ]
 
 
@@ -898,9 +899,12 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
     with st.container(border=True, key=f"tarjeta_{clase_color}_{prefijo}_{nombre}"):
         col_izq, col_der = st.columns([2, 1])
         with col_izq:
-            st.markdown(f"**{datos.get('proveedor')}**")
+            # Piso 13K: contrapart (validar.py), no "proveedor" a seques --
+            # a ingressos on el client es l'emissor (factura propia),
+            # "proveedor" era el propi client, no el seu comprador.
+            st.markdown(f"**{datos.get('contrapart_nom')}**")
             st.caption(
-                f"NIF {datos.get('nif_proveedor')} · Factura {datos.get('num_factura')} · "
+                f"NIF {datos.get('contrapart_nif')} · Factura {datos.get('num_factura')} · "
                 f"{datos.get('fecha_factura')} · estat {datos.get('estado')}"
             )
             for linea in datos.get("lineas_iva") or []:

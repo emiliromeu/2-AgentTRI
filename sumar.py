@@ -89,6 +89,12 @@ valor vacio es lo que el 2007 rechaza al cargar. inyectar_valores_cacheados
 reabre el .xlsx justo despues de guardarlo e injecta ahi el valor que
 el propio codigo ya calculo (el mismo que compara verificar_formulas),
 porque openpyxl no ofrece ninguna forma de escribirlo por su API.
+
+Piso 13K: la columna 3 de DETALL (antes siempre "proveedor") pasa a
+ser la contrapart que ya calcula validar.py -- en DESPESES sigue
+diciendose "Proveïdor" (da lo mismo que antes, el cliente ahi es
+siempre receptor); en INGRESSOS pasa a decir "Client" y muestra el
+comprador real, no el propio cliente cuando el es quien emite.
 """
 
 import csv
@@ -160,6 +166,7 @@ TRADUCCIONES_MOTIVO = [
      "retenció amb quota > 0: el llibre no té columna per representar-la"),
     ("el cliente no aparece ni como emisor ni como receptor",
      "el client no apareix ni com a emissor ni com a receptor"),
+    ("las dos partes son el cliente", "les dues parts són el client"),
 ]
 
 
@@ -924,8 +931,11 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
     if ruta_original:
         asignar_hipervinculo(celda_num, ruta_original)
-    ws.cell(row=fila, column=3, value=datos.get("proveedor"))
-    ws.cell(row=fila, column=4, value=datos.get("nif_proveedor"))
+    # Piso 13K: contrapart (qui NO es el client, per NIF -- validar.py),
+    # no "proveedor" a seques -- a rebudes dona el mateix d'abans (el
+    # client hi es sempre receptor), a ingressos es la peça que fallava.
+    ws.cell(row=fila, column=3, value=datos.get("contrapart_nom"))
+    ws.cell(row=fila, column=4, value=datos.get("contrapart_nif"))
     celda_base = ws.cell(row=fila, column=5, value=linea.get("base"))
     celda_base.number_format = FORMATO_MONEDA
     celda_tipo = ws.cell(row=fila, column=6, value=linea.get("tipo_iva"))
@@ -973,6 +983,13 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
         else:
             facturas_pendientes.append((nombre, datos))
 
+    # Piso 13K: la columna 3 mostra la contrapart (validar.py) -- a
+    # INGRESSOS es diu "Client" (la contrapart hi es qui compra), a
+    # DESPESES es queda "Proveïdor" (la contrapart hi es qui ven).
+    columnas = list(COLUMNAS_DETALLE)
+    if titulo == "DETALL INGRESSOS":
+        columnas[2] = "Client"
+
     for col in range(1, len(COLUMNAS_DETALLE) + 1):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
@@ -982,7 +999,7 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
 
     ws.cell(row=fila, column=1, value="FACTURES QUE SUMEN").font = ESTILO_ENCABEZADO
     fila += 1
-    for col, texto in enumerate(COLUMNAS_DETALLE, start=1):
+    for col, texto in enumerate(columnas, start=1):
         ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
     fila += 1
 
@@ -1023,7 +1040,7 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
         for col in range(1, len(COLUMNAS_DETALLE) + 1):
             ws.cell(row=fila, column=col).fill = RELLENO_AVISO
         fila += 1
-        for col, texto in enumerate(COLUMNAS_DETALLE, start=1):
+        for col, texto in enumerate(columnas, start=1):
             ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
         fila += 1
         nombres_ya_mostrados_pendents = set()

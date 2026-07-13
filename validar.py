@@ -27,6 +27,14 @@ REVISAR con los motivos que toquen. Sin correccions.csv, o vacio, el
 comportamiento -- y el JSON de salida, byte a byte -- es identico al
 de antes de este piso (camps_corregits solo se añade si hay algo que
 corregir).
+
+Piso 13K: bug de campo -- en ingressos donde el cliente es el emisor
+(factura propia), la presentacion mostraba "proveedor" (el propio
+cliente) en vez de su comprador. Nueva capa derivada -- la red de
+validacion NO cambia -- contrapart_nom/contrapart_nif: la parte cuyo
+NIF NO es el del cliente, calculada por NIF, no por posicion del
+campo. Si las dos partes fueran el cliente, motivo nuevo "las dos
+partes son el cliente" (REVISAR).
 """
 
 import csv
@@ -254,6 +262,30 @@ for fila in leer_clientes():
             if etiqueta == "rebudes" and retencion_cuota is not None and retencion_cuota > 0:
                 motivos.append("retención con cuota > 0: el llibre no tiene columna para representarla")
 
+            # Piso 13K: contrapart determinista per NIF, no per posicio del
+            # camp -- "proveedor" es siempre quien EMITE, pero en rebudes
+            # el cliente es SIEMPRE receptor (contrapart = proveedor) mientras
+            # que en ingressos puede ser receptor (liquidacion) O emisor
+            # (factura propia, "el giro" de mas arriba) -- ahi contrapart
+            # pasa a ser el receptor. Se calcula para las DOS flujos (en
+            # rebudes da lo mismo que proveedor de siempre) para que la
+            # presentacion (sumar.py/informe.py/app.py) no tenga que saber
+            # de flujos, solo lea este campo ya resuelto.
+            nif_prov_norm = normalizar_nif(datos.get("nif_proveedor"))
+            nif_rec_norm = normalizar_nif(datos.get("nif_receptor"))
+            prov_es_client = nif_prov_norm is not None and nif_prov_norm == cliente_normalizado
+            rec_es_client = nif_rec_norm is not None and nif_rec_norm == cliente_normalizado
+            if prov_es_client and rec_es_client:
+                contrapart_nom, contrapart_nif = None, None
+                motivos.append("las dos partes son el cliente")
+            elif prov_es_client:
+                contrapart_nom, contrapart_nif = datos.get("receptor"), datos.get("nif_receptor")
+            else:
+                # rec_es_client, o cap dels dos coincideix (ambigu) -- per
+                # defecte la contrapart es el proveedor, el mateix criteri
+                # que ja es feia servir sempre abans d'aquest pis.
+                contrapart_nom, contrapart_nif = datos.get("proveedor"), datos.get("nif_proveedor")
+
             estado = "OK" if not motivos else "REVISAR"
             if estado == "OK":
                 ok += 1
@@ -263,6 +295,8 @@ for fila in leer_clientes():
             salida = dict(datos)
             salida["estado"] = estado
             salida["motivos"] = motivos
+            salida["contrapart_nom"] = contrapart_nom
+            salida["contrapart_nif"] = contrapart_nif
             if nombre in correcciones_aplicadas:
                 salida["camps_corregits"] = correcciones_aplicadas[nombre]
 
