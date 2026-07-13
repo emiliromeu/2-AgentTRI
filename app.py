@@ -732,6 +732,30 @@ def contar_decisiones_sin_recalcular(carpeta_cliente, decisiones):
     return contador
 
 
+def tiene_correccion_pendiente(carpeta_cliente, nombre):
+    """Piso 13H: mateix patro que contar_decisiones_sin_recalcular pero
+    per a correccions.csv -- hi ha alguna fila d'aquesta fitxa escrita
+    DESPRES de l'ultim informe_2026.html generat. Apareix nomes en
+    guardar una correccio, desapareix sol quan RECALCULAR el
+    regenera (regla 10: mai una senyal que menteixi)."""
+    ruta_correccions = os.path.join(carpeta_cliente, "correccions.csv")
+    if not os.path.exists(ruta_correccions):
+        return False
+    ruta_informe = os.path.join(carpeta_cliente, "informe_2026.html")
+    mtime_informe = os.path.getmtime(ruta_informe) if os.path.exists(ruta_informe) else 0
+    with open(ruta_correccions, encoding="utf-8") as f:
+        for fila in csv.DictReader(f):
+            if fila.get("arxiu") != nombre:
+                continue
+            try:
+                marca = datetime.strptime(fila.get("data", ""), "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                continue
+            if marca > mtime_informe:
+                return True
+    return False
+
+
 def estado_revision_cliente(carpeta):
     """Recoge todo lo que necesita la vista Revisio para un cliente:
     fichas (rebudes+ingressos), decisiones, y errores -- todo leido de
@@ -881,6 +905,8 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
                     for c in camps_corregits
                 )
                 st.success(f"Corregit — {detall}")
+            if tiene_correccion_pendiente(carpeta_cliente, nombre):
+                st.info("🕓 Corregit (pendent de recalcular)")
             st.caption(nombre)
         with col_der:
             if ruta_original and extension in EXTENSIONES_IMAGEN:
@@ -920,10 +946,20 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
 
         # Piso 11B: "Corregir camps" -- capa de correccio, mai edita
         # extraidas/. Camps precarregats amb el valor ACTUAL; nomes es
-        # desa el que de veritat canvia. Dins d'un st.form pel mateix
-        # motiu que Aprovar/Descartar (Piso 11A-fix): sense form, un
-        # camp editat sense Tab no es aplicaria en clicar Guardar.
-        with st.popover("Corregir camps"):
+        # desa el que de veritat canvia.
+        #
+        # Piso 13H: abans era un st.popover -- reproduit en directe
+        # (captura + correccions.csv real) que en guardar la correccio
+        # SI s'escrivia be, pero el popover es quedava obert sense cap
+        # senyal visible (regla 10: violacio). Causa: Streamlit no te
+        # cap API per tancar un popover programaticament -- el seu
+        # estat obert/tancat viu al client, independent del rerun de
+        # fragment. st.dialog SI es tanca sol en fer st.rerun() des de
+        # dins seu (aixi ho documenta Streamlit per a aquest patro
+        # exacte de "formulari modal"), aixi que es canvia pel modal
+        # en comptes de lluitar contra el popover.
+        @st.dialog("Corregir camps")
+        def dialog_corregir_camps():
             st.caption(
                 "La fitxa corregida torna a passar tota la validació -- "
                 "corregir no aprova. Cal RECALCULAR després de desar."
@@ -982,8 +1018,19 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo):
                     st.error("Cal escriure un motiu per desar correccions.")
                 else:
                     escribir_correccion(carpeta_cliente, nombre, cambios, motiu_correccio, qui)
-                    st.success(f"{len(cambios)} camp(s) corregit(s). Cal RECALCULAR perquè es reavaluïn.")
-                    st.rerun(scope="fragment")
+                    st.toast(
+                        "Correcció guardada — la fitxa tornarà a passar la xarxa en Recalcular.",
+                        icon="✅",
+                    )
+                    # Piso 13H: comprobado en directe -- st.rerun(scope="fragment")
+                    # NO tanca el dialog quan es crida des de dins (el "obert"
+                    # d'un dialog viu fora del propi re-render del fragment).
+                    # st.rerun() a seques si el tanca -- nomes aquesta accio
+                    # paga aquest cost (es rara, no cada clic).
+                    st.rerun()
+
+        if st.button("Corregir camps", key=f"{prefijo}_obrir_correccio_{nombre}"):
+            dialog_corregir_camps()
 
 
 @st.fragment
