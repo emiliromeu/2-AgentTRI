@@ -45,11 +45,26 @@ def banner(texto):
 
 
 def proceso_vivo(pid):
-    """True si el PID encara existeix. ProcessLookupError vol dir que
-    no hi ha ningú amb aquest PID -- un candau orfe d'un crash anterior
-    que mai va arribar al finally. Qualsevol altre resultat (incloent
-    PermissionError -- existeix pero no tenim permisos per senyalar-lo)
-    es tracta com a viu."""
+    """Piso 13U: REGRESSIÓ GREU trobada i arreglada -- a Windows,
+    signal.CTRL_C_EVENT val 0, i os.kill(pid, 0) NO és un simple xec
+    d'existència com a Unix: crida GenerateConsoleCtrlEvent, que envia
+    l'esdeveniment a TOT el grup de consola que comparteix `pid` --
+    incloent el Streamlit pare, que comparteix grup de consola amb
+    aquest procés (Popen normal, sense CREATE_NEW_PROCESS_GROUP).
+    A Windows, OpenProcess/CloseHandle (ctypes, stdlib, cap dependència
+    nova) NOMÉS consulten -- mai envien cap senyal. A Unix,
+    ProcessLookupError vol dir que no hi ha ningú amb aquest PID -- un
+    candau orfe d'un crash anterior que mai va arribar al finally.
+    Qualsevol altre resultat (incloent PermissionError -- existeix pero
+    no tenim permisos per senyalar-lo) es tracta com a viu."""
+    if os.name == "nt":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

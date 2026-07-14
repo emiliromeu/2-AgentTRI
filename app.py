@@ -99,6 +99,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime
 
 import fitz
@@ -135,6 +136,26 @@ RUTA_LOG_PROCESSAR = ruta_proyecto("proces_log.txt")
 
 
 def proceso_vivo(pid):
+    """Piso 13U: REGRESSIÓ GREU trobada i arreglada -- a Windows,
+    signal.CTRL_C_EVENT val 0, i os.kill(pid, 0) NO és un simple xec
+    d'existència com a Unix: crida GenerateConsoleCtrlEvent, que envia
+    l'esdeveniment a TOT el grup de consola que comparteix `pid`. Com
+    ejecutar.py es llança amb un Popen normal (mateix grup de consola
+    que el Streamlit pare), la primera comprovació del candau (el
+    banner, a CADA càrrega de pàgina) enviava un Ctrl+C real que matava
+    Streamlit sencer -- reproduït i diagnosticat via git diff +
+    documentació de Python/Windows, confirmat que aquest projecte corre
+    en Windows (app.py usa os.startfile(), sumar.py gestiona rutes
+    "C:/..."). A Windows, OpenProcess/CloseHandle (ctypes, stdlib, cap
+    dependència nova) NOMÉS consulten -- mai envien cap senyal."""
+    if os.name == "nt":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -147,18 +168,24 @@ def proceso_vivo(pid):
 def candau_processar_viu():
     """Retorna la info (dict) del candau si un Processar és viu de
     veritat (PID encara existeix), None si no n'hi ha o està mort
-    (orfe -- es deixa tal qual, ejecutar.py ja el neteja en arrencar)."""
-    if not os.path.exists(RUTA_LOCK_PROCESSAR):
-        return None
+    (orfe -- es deixa tal qual, ejecutar.py ja el neteja en arrencar).
+
+    Piso 13U: try/except ample a tota la funció -- el candau el
+    gestiona NOMÉS ejecutar.py; aquí NOMÉS es llegeix, i un candau
+    corrupte, absent, o qualsevol sorpresa de plataforma mai pot tombar
+    el script principal (aquest era exactament el mecanisme de la
+    regressió greu d'aquest pis)."""
     try:
+        if not os.path.exists(RUTA_LOCK_PROCESSAR):
+            return None
         with open(RUTA_LOCK_PROCESSAR, encoding="utf-8") as f:
             info = json.load(f)
-    except (json.JSONDecodeError, OSError):
+        pid = info.get("pid")
+        if pid is None or not proceso_vivo(pid):
+            return None
+        return info
+    except Exception:
         return None
-    pid = info.get("pid")
-    if pid is None or not proceso_vivo(pid):
-        return None
-    return info
 
 
 RUTA_CLIENTES_CSV = ruta_proyecto("clientes", "clientes.csv")
@@ -1280,6 +1307,63 @@ def estado_revision_cliente(carpeta):
     }
 
 
+def normalizar_cerca(texto):
+    """Piso 13U: minúscules + sense accents (NFD treu els diacrítics) +
+    coma->punt (perquè "1234,56" i "1234.56" es trobin igual) -- aplicat
+    als DOS costats (consulta i text buscable) de la cerca de Revisió."""
+    texto = str(texto or "").replace(",", ".")
+    sense_accents = "".join(
+        c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
+    )
+    return sense_accents.lower()
+
+
+def texto_buscable_ficha(nombre, datos):
+    """Piso 13U: tots els camps VISIBLES a la targeta (contrapart, NIF,
+    núm. factura, imports, nom d'arxiu, motius ja TRADUÏTS -- el que es
+    veu, no el cru intern) concatenats i normalitzats per a la cerca."""
+    partes = [
+        datos.get("contrapart_nom"),
+        datos.get("contrapart_nif"),
+        datos.get("num_factura"),
+        datos.get("total"),
+        nombre,
+    ]
+    for linea in datos.get("lineas_iva") or []:
+        partes.append(linea.get("base"))
+        partes.append(linea.get("cuota"))
+    partes.extend(traducir_motivo(m) for m in (datos.get("motivos") or []))
+    return normalizar_cerca(" ".join(str(p) for p in partes if p is not None))
+
+
+def entrada_cerca(etiqueta, key_base):
+    """Piso 13U: camp de cerca reutilitzable per a cada secció paginada
+    de Revisió. FORA de cap st.form (rerun natiu a cada tecla, sense
+    esperar Tab/Enter) i amb key= FIXA (sobreviu als reruns).
+
+    Netejar-lo MAI toca st.session_state[key_input] directament -- el
+    mateix fantasma "cannot be modified after the widget... is
+    instantiated" que ha causat la regressió greu d'aquest pis. El botó
+    "✕ Netejar" marca un senyal petit consumit ABANS que el widget
+    existeixi al proper run (mateix patró que "vista_radio")."""
+    key_input = f"{key_base}_input"
+    key_senyal_netejar = f"{key_base}_netejar_senyal"
+    if st.session_state.pop(key_senyal_netejar, False):
+        st.session_state[key_input] = ""
+
+    col_cerca, col_netejar = st.columns([5, 1])
+    with col_cerca:
+        query = st.text_input(
+            etiqueta, key=key_input, placeholder="contrapart, NIF, núm. factura, import...",
+        )
+    with col_netejar:
+        st.markdown("<div style='height: 1.7rem'></div>", unsafe_allow_html=True)
+        if query and st.button("✕ Netejar", key=f"{key_input}_boto_netejar"):
+            st.session_state[key_senyal_netejar] = True
+            st.rerun()
+    return query
+
+
 def paginar(lista, key_pagina, por_pagina=15):
     """Piso 11C: acota a como mucho `por_pagina` elementos por pantalla
     -- necesario para clientes grandes (davinstal: 240 fitxes), tanto
@@ -2189,16 +2273,35 @@ elif vista == "Processar":
                 # n'hi havia, no fa res) perquè no bloquegi aquest run nou.
                 if os.path.exists(RUTA_STOP_PROCESSAR):
                     os.remove(RUTA_STOP_PROCESSAR)
-                with open(RUTA_LOG_PROCESSAR, "w", encoding="utf-8"):
-                    pass
-                log_handle = open(RUTA_LOG_PROCESSAR, "a", encoding="utf-8")
-                subprocess.Popen(
-                    [sys.executable, "ejecutar.py", qui_processa],
-                    stdout=log_handle, stderr=subprocess.STDOUT, cwd=RAIZ_PROYECTO,
-                )
-                log_handle.close()
-                st.toast("Processament engegat en segon pla.", icon="⚙")
-                st.rerun()
+
+                # Piso 13U: es restaura el patró de sempre (Piso 10.x,
+                # pre-13S) per a QUI llança el procés -- bloquejant, amb
+                # el log en directe a la mateixa pantalla (el "munyeco"
+                # que dona confiança que està corrent de veritat). El
+                # 13S ho havia canviat per un subprocés desslligat sense
+                # cap senyal de vida directa -- es manté NOMÉS com a
+                # extra per a qui NO ha llançat el procés (candau/banner
+                # de dalt): cada línia també es escriu a proces_log.txt
+                # (tee) perquè aquestes altres sessions puguin seguir-lo.
+                placeholder = st.empty()
+                buffer = ""
+                with open(RUTA_LOG_PROCESSAR, "w", encoding="utf-8") as log_file:
+                    proceso = subprocess.Popen(
+                        [sys.executable, "ejecutar.py", qui_processa],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1, cwd=RAIZ_PROYECTO,
+                    )
+                    for linea in proceso.stdout:
+                        buffer += linea
+                        placeholder.code(buffer)
+                        log_file.write(linea)
+                        log_file.flush()
+                    proceso.wait()
+
+                if proceso.returncode == 0:
+                    st.success("Procés acabat.")
+                else:
+                    st.error(f"El procés ha acabat amb error (codi {proceso.returncode}).")
 
             if os.path.exists(RUTA_LOG_PROCESSAR):
                 with open(RUTA_LOG_PROCESSAR, encoding="utf-8") as f:
@@ -2382,10 +2485,21 @@ elif vista == "Revisió":
         # "no existeix aprovar-ho-tot sense selecció" literalment: no hi
         # ha res a clicar, no un boto desactivat.
         st.markdown(f"### Pendents sense decisió ({n_pendents})")
-        if not estado["pendents"]:
-            st.caption("Cap pendent sense decidir.")
+        cerca_pendents = entrada_cerca("🔍 Cercar a Pendents", f"revisio_cerca_pendents_{carpeta}")
+        if cerca_pendents:
+            q_pendents = normalizar_cerca(cerca_pendents)
+            pendents_mostrats = [
+                (n, d, f, o) for n, d, f, o in estado["pendents"]
+                if q_pendents in texto_buscable_ficha(n, d)
+            ]
+            st.caption(f"{len(pendents_mostrats)} resultats de {len(estado['pendents'])}")
         else:
-            pagina_pendents = paginar(estado["pendents"], f"revisio_pag_pendents_{carpeta}")
+            pendents_mostrats = estado["pendents"]
+
+        if not pendents_mostrats:
+            st.caption("Cap pendent sense decidir." if not cerca_pendents else "Cap resultat per aquesta cerca.")
+        else:
+            pagina_pendents = paginar(pendents_mostrats, f"revisio_pag_pendents_{carpeta}")
             for nombre, datos, flujo, origen in pagina_pendents:
                 st.checkbox("Seleccionar per al lot", key=f"revisio_sel_pendent_{carpeta}_{nombre}")
                 tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "pendent", flujo, fila_cliente["nif"])
@@ -2444,22 +2558,43 @@ elif vista == "Revisió":
             oks_ordenadas = sorted(
                 oks_no_decididas, key=lambda t: 0 if avisos_verificacion_ficha(t[1]) else 1
             )
-            if not oks_ordenadas:
-                st.caption("Sense fitxes OK.")
+            cerca_oks = entrada_cerca("🔍 Cercar a Fitxes OK", f"revisio_cerca_oks_{carpeta}")
+            if cerca_oks:
+                q_oks = normalizar_cerca(cerca_oks)
+                oks_mostrades = [
+                    (n, d, f, o) for n, d, f, o in oks_ordenadas if q_oks in texto_buscable_ficha(n, d)
+                ]
+                st.caption(f"{len(oks_mostrades)} resultats de {len(oks_ordenadas)}")
             else:
-                pagina_oks = paginar(oks_ordenadas, f"revisio_pag_oks_{carpeta}")
+                oks_mostrades = oks_ordenadas
+
+            if not oks_mostrades:
+                st.caption("Sense fitxes OK." if not cerca_oks else "Cap resultat per aquesta cerca.")
+            else:
+                pagina_oks = paginar(oks_mostrades, f"revisio_pag_oks_{carpeta}")
                 for nombre, datos, flujo, origen in pagina_oks:
                     tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "ok", flujo, fila_cliente["nif"])
 
         st.markdown(f"### Errors ({n_errores})")
-        if not estado["errores"]:
-            st.caption("Cap error per resoldre.")
+        cerca_errors = entrada_cerca("🔍 Cercar a Errors", f"revisio_cerca_errors_{carpeta}")
+        if cerca_errors:
+            q_errors = normalizar_cerca(cerca_errors)
+            errores_mostrats = [
+                (f, r) for f, r in estado["errores"]
+                if q_errors in normalizar_cerca(f"{os.path.basename(r)} {f}")
+            ]
+            st.caption(f"{len(errores_mostrats)} resultats de {len(estado['errores'])}")
+        else:
+            errores_mostrats = estado["errores"]
+
+        if not errores_mostrats:
+            st.caption("Cap error per resoldre." if not cerca_errors else "Cap resultat per aquesta cerca.")
         else:
             st.caption(
                 "Si l'arxiu és bo però va quedar corromput (iCloud), torna'l a pujar "
                 "abans de retirar res."
             )
-            pagina_errores = paginar(estado["errores"], f"revisio_pag_errors_{carpeta}")
+            pagina_errores = paginar(errores_mostrats, f"revisio_pag_errors_{carpeta}")
             for flujo, ruta in pagina_errores:
                 st.checkbox("Seleccionar per al lot", key=f"revisio_sel_error_{carpeta}_{ruta}")
                 tarjeta_error(flujo, ruta, estado["carpeta_cliente"], qui, "error")
@@ -2509,8 +2644,19 @@ elif vista == "Revisió":
             grups_ordenats[clau] = membres_amb_data
 
         st.markdown(f"### Duplicats ({len(grups_duplicats)} grups)")
-        if not grups_duplicats:
-            st.caption("Cap duplicat detectat.")
+        cerca_duplicats = entrada_cerca("🔍 Cercar a Duplicats", f"revisio_cerca_duplicats_{carpeta}")
+        if cerca_duplicats:
+            q_duplicats = normalizar_cerca(cerca_duplicats)
+            # Piso 13U: es filtra per GRUP sencer -- es manté si QUALSEVOL
+            # membre coincideix (resoldre un duplicat es fa en bloc).
+            grups_ordenats = {
+                clau: membres for clau, membres in grups_ordenats.items()
+                if any(q_duplicats in texto_buscable_ficha(n, d) for n, d, f, o in grups_duplicats[clau])
+            }
+            st.caption(f"{len(grups_ordenats)} grups de {len(grups_duplicats)}")
+
+        if not grups_ordenats:
+            st.caption("Cap duplicat detectat." if not cerca_duplicats else "Cap resultat per aquesta cerca.")
         else:
             total_copies = sum(len(m) - 1 for m in grups_ordenats.values())
             # Piso 13T: el botó gros aplica la MATEIXA preselecció que ja fa
