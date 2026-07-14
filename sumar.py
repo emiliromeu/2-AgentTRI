@@ -105,6 +105,14 @@ CUALQUIER hyperlink de "Núm. factura" en DETALL INGRESSOS de CUALQUIER
 cliente -- confirmado al arreglarlo, el numero de enllaços verificats
 subio de golpe en todos los clientes con ingressos (antes esas celdas
 nunca tenian enllaç, en silenci, des de sempre).
+
+Piso 13O: petició d'una revisora -- les dates de l'Excel (columna
+"Data" del DETALL, i la cel·la "Generat el..." de la capçalera,
+repetida a la fulla AVISOS) passen de text ISO a objecte datetime
+real amb number_format dd/mm/yyyy -- Excel ja les tracta com a DATES
+de veritat (ordenables, filtrables, llestes per a Geyce V2). Nomes
+aquest fitxer canvia -- app.py/informe.py/JSON/CSV interns es queden
+en ISO, correcte com estava.
 """
 
 import csv
@@ -156,7 +164,7 @@ RELLENO_DESCARTAT = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_t
 BORDE_SUPERIOR = Border(top=Side(style="thin"))
 AJUSTE_TEXTO = Alignment(wrap_text=True, vertical="top")
 
-GENERADO_EL = datetime.now().strftime("%d/%m/%Y %H:%M")
+FECHA_GENERACION = datetime.now()
 
 # Traduccion de los motivos de validar.py -- son textos fijos con datos
 # incrustados (numeros, nombres de archivo), asi que se traduce por
@@ -640,7 +648,13 @@ def escribir_titulo(ws, nombre_cliente, nif_cliente):
     ws.cell(row=1, column=1, value=f"SUMATORIS {nombre_cliente}").font = FUENTE_TITULO
     ws.cell(row=2, column=1, value=f"NIF {nif_cliente}").font = FUENTE_SUBTITULO
     ws.cell(row=3, column=1, value="Ejercici 2026").font = FUENTE_SUBTITULO
-    ws.cell(row=4, column=1, value=f"Generat el {GENERADO_EL}").font = FUENTE_SUBTITULO
+    # Piso 13O: objecte datetime real (no text) -- mateixa tecnica que
+    # FORMATO_MONEDA (text literal dins del number_format, Piso 13F),
+    # aixi la cel·la es veu identica ("Generat el 14/07/2026 10:30")
+    # pero el valor subjacent ja es una data de veritat.
+    celda_generat = ws.cell(row=4, column=1, value=FECHA_GENERACION)
+    celda_generat.number_format = '"Generat el "dd/mm/yyyy hh:mm'
+    celda_generat.font = FUENTE_SUBTITULO
     return 6  # fila 5 en blanco, el resto empieza en la 6
 
 
@@ -925,6 +939,26 @@ COLUMNA_RETENCIO_DETALLE = "H"
 COLUMNA_TOTAL_DETALLE = "I"
 
 
+def celda_fecha(ws, fila, columna, fecha_iso):
+    """Piso 13O: objecte datetime real (no text) -- Excel el tracta
+    com a DATA de veritat (ordenable, filtrable, llest per a la
+    importació a Geyce V2), amb format dd/mm/yyyy. Si fecha_iso es
+    buit o no es un ISO valid ("YYYY-MM-DD" -- una OCR erronia, per
+    exemple), s'escriu el valor cru tal qual com a text -- mai un
+    crash (regla 4: nada falla en silencio, pero tampoc tira avall el
+    lot per una data mal llegida)."""
+    celda = ws.cell(row=fila, column=columna)
+    if fecha_iso:
+        try:
+            celda.value = datetime.strptime(fecha_iso, "%Y-%m-%d")
+            celda.number_format = "dd/mm/yyyy"
+            return celda
+        except ValueError:
+            pass
+    celda.value = fecha_iso
+    return celda
+
+
 def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, carpeta_cliente, decision, nombres_ya_mostrados, relleno_forzado=None):
     """Escribe una fila de DETALL (una linia d'IVA). Si relleno_forzado
     es None, el color/estat se deriva de decision/estado (bloque
@@ -978,7 +1012,7 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     if resumen_historial:
         estado_mostrado += f" | HISTORIAL: {resumen_historial}"
 
-    ws.cell(row=fila, column=1, value=datos.get("fecha_factura"))
+    celda_fecha(ws, fila, 1, datos.get("fecha_factura"))
     celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
     if ruta_original:
         asignar_hipervinculo(celda_num, ruta_original)
