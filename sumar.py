@@ -119,6 +119,7 @@ import csv
 import json
 import os
 import re
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -543,6 +544,32 @@ def _mapa_hojas_xml(zf):
         ruta = target[1:] if target.startswith("/") else f"xl/{target}"
         mapa[nombre_m.group(1)] = ruta
     return mapa
+
+
+def guardar_amb_reintents(fn_escriure):
+    """Piso 13W: abans, un sol PermissionError es donava per "Excel
+    obert" i es rendia a la primera -- pero a Windows, PermissionError
+    (WinError 5/32) es la MATEIXA excepcio tant si Excel el te obert
+    de veritat com si es un antivirus, OneDrive/iCloud sincronitzant,
+    o l'atribut de nomes-lectura: no hi ha manera de distingir la
+    causa des del tipus d'excepcio. En comptes d'endevinar, es
+    reintenta -- la majoria de bloquejos son transitoris i es
+    resolen sols en segons. Intent 1 immediat; si falla, 5 reintents
+    mes amb esperes creixents 0.5/1/2/3/4s (~10.5s totals, 6 intents
+    en total). Retorna (True, None) si reeix, (False, ultim_error) si
+    els 6 fallen -- el crider tria el missatge exacte (cada fitxer te
+    el seu propi nom i verb)."""
+    esperes = [0, 0.5, 1, 2, 3, 4]
+    ultim_error = None
+    for espera in esperes:
+        if espera:
+            time.sleep(espera)
+        try:
+            fn_escriure()
+            return True, None
+        except PermissionError as e:
+            ultim_error = e
+    return False, ultim_error
 
 
 def inyectar_valores_cacheados(ruta_excel, comprobaciones_por_hoja):
@@ -1640,27 +1667,36 @@ for fila_cliente in leer_clientes():
     )
 
     ruta_excel = f"{carpeta_cliente}/sumatorios_2026.xlsx"
-    # Piso 13G: a Windows, un Excel obert bloqueja el fitxer -- es
-    # captura per client (regla 4: el lot mai mor) en comptes de tirar
-    # avall tot el batch, i mai deixa un fitxer a mig escriure (un
-    # altre cami cap a "reparar").
-    try:
-        wb.save(ruta_excel)
-    except PermissionError:
-        print(f"AVISO: {carpeta} -- no s'ha pogut escriure {ruta_excel}. Tanca l'Excel del client abans de recalcular.")
+    # Piso 13G/13W: a Windows, un Excel obert bloqueja el fitxer --
+    # es captura per client (regla 4: el lot mai mor) en comptes de
+    # tirar avall tot el batch, i mai deixa un fitxer a mig escriure
+    # (un altre cami cap a "reparar"). Piso 13W: abans de rendir-se,
+    # reintenta amb paciencia (guardar_amb_reintents) -- un PermissionError
+    # no vol dir necessariament que Excel el tingui obert (vegeu la
+    # funcio), aixi que el missatge final mai ho afirma com a cert.
+    ok, error = guardar_amb_reintents(lambda: wb.save(ruta_excel))
+    if not ok:
+        print(
+            f"AVISO: {carpeta} / Excel: ✗ bloquejat -- no s'ha pogut escriure {ruta_excel} "
+            f"despres de 6 intents (~10s): {type(error).__name__}: {error}. Tanca l'Excel "
+            f"d'aquest client si el tens obert, o torna-ho a provar en uns segons."
+        )
         continue
-    print(f"Escrito: {ruta_excel}")
+    print(f"{carpeta} / Excel: ✓ actualitzat ({ruta_excel})")
     if comprobaciones_por_hoja:
         # Piso 13J: mismo motivo que el PermissionError de wb.save() --
         # reescribe el archivo entero, y en Windows podria estar
         # bloqueado si alguien lo abrio justo entre el guardado y aqui.
-        try:
-            inyectar_valores_cacheados(ruta_excel, comprobaciones_por_hoja)
-        except PermissionError:
+        ok_inj, error_inj = guardar_amb_reintents(
+            lambda: inyectar_valores_cacheados(ruta_excel, comprobaciones_por_hoja)
+        )
+        if not ok_inj:
             print(
-                f"AVISO: {carpeta} -- no s'ha pogut reescriure {ruta_excel} amb els valors "
-                f"calculats (Excel 2007 podria seguir demanant reparar). Tanca l'Excel del "
-                f"client i torna a executar."
+                f"AVISO: {carpeta} / Excel: ✗ valors calculats no injectats -- no s'ha pogut "
+                f"reescriure {ruta_excel} despres de 6 intents (~10s): "
+                f"{type(error_inj).__name__}: {error_inj} (Excel 2007 podria seguir demanant "
+                f"reparar). Tanca l'Excel d'aquest client si el tens obert, o torna-ho a "
+                f"provar en uns segons."
             )
     verificar_enlaces_excel(ruta_excel, carpeta_cliente)
     if comprobaciones_por_hoja:

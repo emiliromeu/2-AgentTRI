@@ -70,6 +70,7 @@ import html
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -452,6 +453,29 @@ def ruta_relativa_html(ruta_original, carpeta_cliente):
 def esc(valor):
     """Escapa texto para HTML; None se convierte en cadena vacia."""
     return html.escape(str(valor)) if valor is not None else ""
+
+
+def guardar_amb_reintents(fn_escriure):
+    """Piso 13W: mateixa funcio que sumar.py (duplicada a proposit, cap
+    "maquina" n'importa una altra) -- abans, un sol PermissionError es
+    donava per "informe obert" i es rendia a la primera, pero aquesta
+    excepcio es identica tant si es l'informe obert en un editor/visor
+    com si es un antivirus, sincronitzador, o nomes-lectura: no es pot
+    distingir la causa des del tipus d'excepcio. Reintenta abans de
+    rendir-se -- intent 1 immediat, 5 reintents mes amb esperes
+    creixents 0.5/1/2/3/4s (~10.5s totals, 6 intents). Retorna
+    (True, None) si reeix, (False, ultim_error) si els 6 fallen."""
+    esperes = [0, 0.5, 1, 2, 3, 4]
+    ultim_error = None
+    for espera in esperes:
+        if espera:
+            time.sleep(espera)
+        try:
+            fn_escriure()
+            return True, None
+        except PermissionError as e:
+            ultim_error = e
+    return False, ultim_error
 
 
 def construir_enllac(ruta_original, carpeta_cliente, texto, clase=""):
@@ -1091,20 +1115,29 @@ for fila_cliente in leer_clientes():
 </html>"""
 
     ruta_html = f"{carpeta_cliente}/informe_2026.html"
-    # Piso 13P: mateixa guàrdia que sumar.py (Piso 13G) -- si l'informe
-    # esta obert en un editor/visor que el bloqueja, abans es trencava
-    # TOT informe.py sense capturar (pitjor que sumar.py: es perdien
-    # tots els clients restants del bucle, no nomes aquest). El lot
-    # mai mor -- es salta aquest client i es continua.
-    try:
+    # Piso 13P/13W: mateixa guàrdia que sumar.py (Piso 13G) -- si
+    # l'informe esta obert en un editor/visor que el bloqueja, abans es
+    # trencava TOT informe.py sense capturar (pitjor que sumar.py: es
+    # perdien tots els clients restants del bucle, no nomes aquest). El
+    # lot mai mor -- es salta aquest client i es continua. Piso 13W:
+    # abans de rendir-se, reintenta amb paciencia -- un PermissionError
+    # no vol dir necessariament que l'informe estigui obert (vegeu
+    # guardar_amb_reintents), aixi que el missatge final mai ho afirma
+    # com a cert.
+    def escriure_informe():
         with open(ruta_html, "w", encoding="utf-8") as f:
             f.write(html_final)
-    except PermissionError:
-        print(f"AVISO: {carpeta} -- no s'ha pogut escriure {ruta_html}. Tanca l'informe del client abans de recalcular.")
+
+    ok, error = guardar_amb_reintents(escriure_informe)
+    if not ok:
+        print(
+            f"AVISO: {carpeta} / informe: ✗ bloquejat -- no s'ha pogut escriure {ruta_html} "
+            f"despres de 6 intents (~10s): {type(error).__name__}: {error}. Tanca "
+            f"l'informe d'aquest client si el tens obert, o torna-ho a provar en uns segons."
+        )
         continue
 
-    print(f"{carpeta} / informe: {n_tarjetas} tarjetas")
-    print(f"Escrito: {ruta_html}")
+    print(f"{carpeta} / informe: ✓ actualitzat ({n_tarjetas} tarjetas, {ruta_html})")
     verificar_enlaces(ruta_html, carpeta_cliente)
 
     clientes_generados.append({
