@@ -35,6 +35,10 @@ load_dotenv()
 api_key = os.environ.get("ANTHROPIC_API_KEY")
 cliente = Anthropic(api_key=api_key)
 
+# Piso 13S: processar.stop -- comprovat ENTRE lots (mai a mitges d'una
+# crida a l'API), mateix criteri que extraer_todas.py.
+RUTA_STOP = RAIZ / "processar.stop"
+
 LIMITE_BYTES = 18 * 1024 * 1024
 
 TIPOS_VALIDOS = {"factura", "abono", "albara", "liquidacion_ingreso", "ruido"}
@@ -191,16 +195,27 @@ def procesar_flujo_lotes(carpeta, nombre_cliente, nif_cliente, ruta_lotes, ruta_
     contador_tipos) d'aquest moll nomes -- el bucle principal ho suma."""
     ok = saltados = con_error = 0
     contador_tipos = {}
+    aturat_per_stop = False
 
     if not os.path.isdir(ruta_lotes):
-        return ok, saltados, con_error, contador_tipos
+        return ok, saltados, con_error, contador_tipos, aturat_per_stop
     os.makedirs(ruta_procesados, exist_ok=True)
 
     nombres_lote = sorted(
         f for f in os.listdir(ruta_lotes) if f.lower().endswith(".pdf")
     )
 
-    for nombre_lote in nombres_lote:
+    for indice, nombre_lote in enumerate(nombres_lote):
+        if RUTA_STOP.exists():
+            pendientes = len(nombres_lote) - indice
+            print(
+                f"\nATURAT per petició de l'usuari a {carpeta} -- {ok} lots processats aquí, "
+                f"{pendientes} pendents aquí (pot haver-hi més en altres clients/fluxos). "
+                "Reprèn amb Processar quan vulguis."
+            )
+            aturat_per_stop = True
+            break
+
         ruta_lote = os.path.join(ruta_lotes, nombre_lote)
         ruta_destino_procesado = os.path.join(ruta_procesados, nombre_lote)
         base_lote = os.path.splitext(nombre_lote)[0]
@@ -298,7 +313,7 @@ def procesar_flujo_lotes(carpeta, nombre_cliente, nif_cliente, ruta_lotes, ruta_
             print(f"AVISO: error procesando {nombre_lote}: {e}")
             con_error += 1
 
-    return ok, saltados, con_error, contador_tipos
+    return ok, saltados, con_error, contador_tipos, aturat_per_stop
 
 
 lotes_procesados_ok = 0
@@ -306,13 +321,15 @@ lotes_saltados = 0
 lotes_con_error = 0
 contador_tipos = {t: 0 for t in TIPOS_VALIDOS | TIPOS_VALIDOS_VENDES}
 
+aturat_global = False
 for fila in leer_clientes():
+    if aturat_global:
+        break
     carpeta = fila["carpeta"]
     origen_ingressos = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
 
-    resultados_flujos = [
-        procesar_flujo_lotes(
-            carpeta, fila["nombre"], fila["nif"],
+    llamadas_flujo = [
+        (
             f"clientes/{carpeta}/rebudes/lotes_escaneados",
             f"clientes/{carpeta}/rebudes/lotes_procesados",
             construir_prompt, TIPOS_VALIDOS, DESTINO_POR_TIPO,
@@ -320,20 +337,30 @@ for fila in leer_clientes():
         # Piso 13K: moll bessó de vendes -- factura/abono van a
         # l'origen d'ingressos d'aquest client (personalitzat per a
         # davinstal, com qualsevol Vendes solta).
-        procesar_flujo_lotes(
-            carpeta, fila["nombre"], fila["nif"],
+        (
             f"clientes/{carpeta}/apartados/lotes_vendes_escaneados",
             f"clientes/{carpeta}/apartados/lotes_vendes_procesados",
             construir_prompt_vendes, TIPOS_VALIDOS_VENDES,
             {"factura": origen_ingressos, "abono": origen_ingressos},
         ),
     ]
-    for ok, saltados, con_error, tipos_flujo in resultados_flujos:
+    # Piso 13S: cada moll es una crida separada -- si el primer (rebudes)
+    # detecta processar.stop, el segon (vendes) d'aquest MATEIX client ja
+    # no arrenca (mai a mitges, pero tampoc un lot de mes un cop demanat
+    # aturar-se).
+    for ruta_lotes, ruta_procesados, prompt_fn, tipos_validos, destino in llamadas_flujo:
+        if aturat_global:
+            break
+        ok, saltados, con_error, tipos_flujo, aturat_flujo = procesar_flujo_lotes(
+            carpeta, fila["nombre"], fila["nif"], ruta_lotes, ruta_procesados, prompt_fn, tipos_validos, destino,
+        )
         lotes_procesados_ok += ok
         lotes_saltados += saltados
         lotes_con_error += con_error
         for tipo, n in tipos_flujo.items():
             contador_tipos[tipo] = contador_tipos.get(tipo, 0) + n
+        if aturat_flujo:
+            aturat_global = True
 
 print(f"\nResumen: {lotes_procesados_ok} lotes procesados, {lotes_saltados} saltados, {lotes_con_error} con error")
 print(f"Documentos cortados por tipo: {contador_tipos}")

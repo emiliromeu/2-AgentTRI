@@ -123,6 +123,43 @@ def ruta_proyecto(*partes):
     return os.path.join(RAIZ_PROYECTO, *partes)
 
 
+# Piso 13S: candau de Processar -- mai dues "fàbriques" corrent alhora
+# sobre els mateixos arxius. Mateix criteri que ejecutar.py (duplicat a
+# proposit, cap "maquina" n'importa una altra); aquest fitxer, a més,
+# es qui LLANÇA ejecutar.py, així que ha de saber comprovar-ho abans de
+# fer-ho i mentre corre en segon pla.
+RUTA_LOCK_PROCESSAR = ruta_proyecto("processar.lock")
+RUTA_STOP_PROCESSAR = ruta_proyecto("processar.stop")
+RUTA_LOG_PROCESSAR = ruta_proyecto("proces_log.txt")
+
+
+def proceso_vivo(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def candau_processar_viu():
+    """Retorna la info (dict) del candau si un Processar és viu de
+    veritat (PID encara existeix), None si no n'hi ha o està mort
+    (orfe -- es deixa tal qual, ejecutar.py ja el neteja en arrencar)."""
+    if not os.path.exists(RUTA_LOCK_PROCESSAR):
+        return None
+    try:
+        with open(RUTA_LOCK_PROCESSAR, encoding="utf-8") as f:
+            info = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    pid = info.get("pid")
+    if pid is None or not proceso_vivo(pid):
+        return None
+    return info
+
+
 RUTA_CLIENTES_CSV = ruta_proyecto("clientes", "clientes.csv")
 CAMPOS_CLIENTES_CSV = ["nif", "nombre", "carpeta"]
 EXTENSIONES_PERMITIDAS = ["pdf", "jpg", "jpeg", "png", "heic", "heif"]
@@ -710,14 +747,14 @@ TRADUCCIONES_MOTIVO = [
     ("nif_receptor no coincide: esperado", "el nif_receptor no coincideix: s'esperava"),
     (", encontrado ", ", s'ha trobat "),
     ("factura duplicada: mismo proveedor+num_factura que", "factura duplicada: mateix proveïdor+núm_factura que"),
-    ("retención con cuota > 0: el llibre no tiene columna para representarla",
-     "retenció amb quota > 0: el llibre no té columna per representar-la"),
     ("el cliente no aparece ni como emisor ni como receptor",
      "el client no apareix ni com a emissor ni com a receptor"),
     ("las dos partes son el cliente", "les dues parts són el client"),
     ("importe numérico ilegible en", "import numèric il·legible a"),
     ("marcada como exenta pero tiene líneas con IVA -- corrige las líneas (tipo 0, cuota 0) o desmarca exenta",
      "marcada com a exempta però té línies amb IVA -- corregeix les línies (tipus 0, quota 0) o desmarca exempta"),
+    ("retención no cuadra:", "la retenció no quadra:"),
+    ("pero retencion_cuota indica", "però la retenció indica"),
 ]
 
 
@@ -1376,6 +1413,17 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
             if datos.get("suggerit_carpeta"):
                 st.warning(f"Sembla de **{datos.get('suggerit_nom')}** — vols moure-ho?")
 
+        # Piso 13S: clau del popover "⋮ Més accions" de sota -- st.popover
+        # accepta key= des d'aquesta versió de Streamlit (no ho feia al
+        # 13H). Posar aquesta clau a False just abans de CADA rerun que
+        # ja existeix dins seu (moure de flux, moure a client, guardar/
+        # cancelar la correcció) el tanca de veritat -- confirmat amb un
+        # mini-repro aïllat abans de tocar aquest codi.
+        popover_key = f"popover_{prefijo}_{nombre}"
+
+        def _tancar_popover():
+            st.session_state[popover_key] = False
+
         # Piso 11B: "Corregir camps" -- capa de correccio, mai edita
         # extraidas/. Camps precarregats amb el valor ACTUAL; nomes es
         # desa el que de veritat canvia.
@@ -1390,7 +1438,14 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
         # dins seu (aixi ho documenta Streamlit per a aquest patro
         # exacte de "formulari modal"), aixi que es canvia pel modal
         # en comptes de lluitar contra el popover.
-        @st.dialog("Corregir camps")
+        #
+        # Piso 13S: el mateix fantasma reaparegut un nivell amunt -- ARA
+        # es aquest dialog qui viu DINS del popover "⋮ Més accions", i
+        # obrir-lo no tancava el popover que el conté (reproduit en
+        # directe, captura feta). on_dismiss tanca el popover si es
+        # cancel·la sense guardar; el camí de "Guardar" ho fa explicitament
+        # just abans del seu propi st.rerun() de sempre.
+        @st.dialog("Corregir camps", on_dismiss=_tancar_popover)
         def dialog_corregir_camps():
             st.caption(
                 "La fitxa corregida torna a passar tota la validació -- "
@@ -1481,9 +1536,10 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                     # d'un dialog viu fora del propi re-render del fragment).
                     # st.rerun() a seques si el tanca -- nomes aquesta accio
                     # paga aquest cost (es rara, no cada clic).
+                    _tancar_popover()
                     st.rerun()
 
-        with st.popover("⋮ Més accions"):
+        with st.popover("⋮ Més accions", key=popover_key):
             if not decision and prefijo == "pendent":
                 st.markdown("**Moure a l'altre flux**")
                 with st.form(key=f"form_moure_{prefijo}_{nombre}", border=False):
@@ -1495,6 +1551,7 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                         motiu_moure or "Moviment individual des de Revisió", qui,
                     )
                     st.toast(f"Mogut a {flujo_contrari}. Recalcula per refer els veredictes.", icon="↔️")
+                    _tancar_popover()
                     st.rerun(scope="fragment")
 
             if not decision and clients_altres:
@@ -1526,6 +1583,7 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                         flujo_desti=flux_desti_intern,
                     )
                     st.toast(f"Mogut a {eleccio_desti}. Recalcula per refer els veredictes.", icon="↔️")
+                    _tancar_popover()
                     st.rerun(scope="fragment")
 
             st.markdown("**Corregir camps**")
@@ -1565,7 +1623,12 @@ def bloque_decidit(archivo, carpeta_cliente, qui):
     # acció aquí (Desfer), però mateix criteri d'endreça consistent a
     # tota la vista Revisió. No es converteix aquesta fila en targeta
     # amb vora -- només l'acció es reculla darrere el popover.
-    with st.popover("⋮ Més accions"):
+    #
+    # Piso 13S: key= al popover + tancar-lo abans del st.rerun() que ja
+    # feia -- mateix arranjament que tarjeta_revisio (el fantasma del
+    # popover que no es tanca).
+    popover_key = f"popover_desfer_{archivo}"
+    with st.popover("⋮ Més accions", key=popover_key):
         with st.form(key=f"form_desfer_{archivo}", border=False):
             motiu_desfer = st.text_input("Motiu (opcional)", key=f"desfer_motiu_{archivo}")
             click_desfer = st.form_submit_button("Desfer aquesta decisió")
@@ -1578,6 +1641,7 @@ def bloque_decidit(archivo, carpeta_cliente, qui):
                 st.error("No hi ha res a revertir.")
             else:
                 st.toast(f"Decisió desfeta — {archivo} torna a pendents.", icon="↩️")
+                st.session_state[popover_key] = False
                 st.rerun()
 
 
@@ -1707,13 +1771,51 @@ if not os.path.isdir(ruta_proyecto("clientes")):
             st.rerun()
     st.stop()
 
-if "log_proces" not in st.session_state:
-    st.session_state["log_proces"] = None
 if "log_recalcular" not in st.session_state:
     st.session_state["log_recalcular"] = None
 
 st.title("Agent TRIMESTRE")
-vista = st.sidebar.radio("Navegació", ["Clients", "Afegir factures", "Processar", "Revisió", "Manteniment"])
+
+# Piso 13S: Streamlit no deixa tocar st.session_state["vista_radio"]
+# UN COP el widget amb aquesta key ja s'ha instanciat en aquest mateix
+# run (StreamlitAPIException, reproduit en directe) -- per aixo "Veure
+# progrés" (banner de sota) nomes marca un senyal petit ABANS de crear
+# el radio; aquest bloc el consumeix i fixa el valor de veritat abans
+# que el widget existeixi.
+if st.session_state.pop("_saltar_a_processar", False):
+    st.session_state["vista_radio"] = "Processar"
+
+# Piso 13S: key= perquè "Veure progrés" pugui saltar aquí mateix des de
+# qualsevol altra vista sense rellançar res -- reconnectar, no rellançar.
+vista = st.sidebar.radio(
+    "Navegació", ["Clients", "Afegir factures", "Processar", "Revisió", "Manteniment"], key="vista_radio",
+)
+
+# Piso 13S: semàfor -- banner persistent a TOTES les vistes mentre hi ha
+# un Processar viu (candau real, PID comprovat). Navegar fora no atura
+# res -- el procés ja és independent del run que el va llançar -- per
+# aixo el banner ho diu explícitament en lloc de deixar-ho ambigu.
+_candau_global = candau_processar_viu()
+if _candau_global:
+    st.warning(
+        f"⚙ Processant [{_candau_global.get('abast')}]... iniciat a les "
+        f"{_candau_global.get('data_inici')} per {_candau_global.get('qui')}. "
+        "El procés continua en segon pla encara que naveguis fora."
+    )
+    col_veure, col_parar_global = st.columns(2)
+    with col_veure:
+        if st.button("Veure progrés", key="banner_veure_progres"):
+            st.session_state["_saltar_a_processar"] = True
+            st.rerun()
+    with col_parar_global:
+        if st.button("PARAR", key="banner_parar"):
+            with open(RUTA_STOP_PROCESSAR, "w", encoding="utf-8"):
+                pass
+            st.toast(
+                "S'ha demanat aturar el procés -- acabarà la factura/lot que té entre mans.",
+                icon="🛑",
+            )
+            st.rerun()
 
 # ----------------------------------------------------------------------
 if vista == "Clients":
@@ -1886,41 +1988,101 @@ elif vista == "Processar":
 
     if not clientes:
         st.info("Encara no hi ha cap client donat d'alta -- res per processar.")
-    else:
-        if st.button("Processar", type="primary"):
-            placeholder = st.empty()
-            buffer = ""
-            proceso = subprocess.Popen(
-                [sys.executable, "ejecutar.py"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                cwd=RAIZ_PROYECTO,
-            )
-            for linea in proceso.stdout:
-                buffer += linea
-                placeholder.code(buffer)
-            proceso.wait()
-            st.session_state["log_proces"] = buffer
-            if proceso.returncode == 0:
-                st.success("Procés acabat.")
+    elif not st.session_state.get("qui_processa_confirmat"):
+        st.info("Cal indicar qui processa abans de llançar-ho.")
+        with st.form("form_qui_processa"):
+            nom_qui_processa = st.text_input("Qui processa?", key="qui_processa_input")
+            entrar_processa = st.form_submit_button("Entrar", type="primary")
+        if entrar_processa:
+            if not nom_qui_processa.strip():
+                st.error("Cal escriure un nom abans de continuar.")
             else:
-                st.error(f"El procés ha acabat amb error (codi {proceso.returncode}).")
+                st.session_state["qui_processa_confirmat"] = nom_qui_processa.strip()
+                st.rerun()
+        st.stop()
+    else:
+        qui_processa = st.session_state["qui_processa_confirmat"]
+        col_qui_p, col_canviar_p = st.columns([4, 1])
+        with col_qui_p:
+            st.caption(f"Processant com: **{qui_processa}**")
+        with col_canviar_p:
+            if st.button("Canviar qui processa", key="qui_processa_canviar"):
+                st.session_state["qui_processa_confirmat"] = None
+                st.rerun()
 
-        if st.session_state["log_proces"]:
-            st.subheader("Resum per client")
-            st.caption(
-                "S'han processat tots els clients (els que ja estaven al dia "
-                "s'han saltat per idempotència)."
+        # Piso 13S: Processar ja no bloqueja la sessió sencera -- llança
+        # ejecutar.py DESLLIGAT (stdout a un fitxer, mai una pipe llegida
+        # en un bucle síncron) i torna de seguida. El candau
+        # (processar.lock) és la font de veritat de si encara corre;
+        # "Veure progrés"/aquesta mateixa vista només RECONNECTEN
+        # llegint proces_log.txt fresc del disc, mai rellancen res.
+        candau = candau_processar_viu()
+        if candau:
+            st.warning(
+                f"⚙ Ja hi ha un processament en marxa (iniciat per {candau.get('qui')} "
+                f"a les {candau.get('data_inici')}). Espera que acabi o para'l."
             )
-            for fila in clientes:
-                linias_cliente = [
-                    linia for linia in st.session_state["log_proces"].splitlines()
-                    if linia.startswith(f"{fila['carpeta']} ")
-                ]
-                tarjeta_cliente(fila, "final", lineas_log=linias_cliente)
-            boton_obrir("Obrir portada", ruta_proyecto("clientes", "index.html"), key="final_portada")
+            log_actual = ""
+            if os.path.exists(RUTA_LOG_PROCESSAR):
+                with open(RUTA_LOG_PROCESSAR, encoding="utf-8") as f:
+                    log_actual = f.read()
+            st.code(log_actual or "(encara sense sortida)")
+            col_actualitza, col_parar = st.columns(2)
+            with col_actualitza:
+                if st.button("Actualitza el registre", key="processar_actualitza"):
+                    st.rerun()
+            with col_parar:
+                if st.button("PARAR", type="primary", key="processar_parar"):
+                    with open(RUTA_STOP_PROCESSAR, "w", encoding="utf-8"):
+                        pass
+                    st.toast(
+                        "S'ha demanat aturar el procés -- acabarà la factura/lot que té entre mans.",
+                        icon="🛑",
+                    )
+                    st.rerun()
+        else:
+            if st.button("Processar", type="primary"):
+                # Piso 13S: neteja d'un stop antic (idempotent -- si no
+                # n'hi havia, no fa res) perquè no bloquegi aquest run nou.
+                if os.path.exists(RUTA_STOP_PROCESSAR):
+                    os.remove(RUTA_STOP_PROCESSAR)
+                with open(RUTA_LOG_PROCESSAR, "w", encoding="utf-8"):
+                    pass
+                log_handle = open(RUTA_LOG_PROCESSAR, "a", encoding="utf-8")
+                subprocess.Popen(
+                    [sys.executable, "ejecutar.py", qui_processa],
+                    stdout=log_handle, stderr=subprocess.STDOUT, cwd=RAIZ_PROYECTO,
+                )
+                log_handle.close()
+                st.toast("Processament engegat en segon pla.", icon="⚙")
+                st.rerun()
+
+            if os.path.exists(RUTA_LOG_PROCESSAR):
+                with open(RUTA_LOG_PROCESSAR, encoding="utf-8") as f:
+                    log_final = f.read()
+                if log_final:
+                    if "ATURAT per petició" in log_final:
+                        st.warning("L'últim Processar es va aturar per petició de l'usuari abans d'acabar.")
+                    elif "AVISO:" in log_final and "Pipeline completo" not in log_final:
+                        st.error("L'últim Processar va acabar amb un error. Revisa el registre de sota.")
+                    elif "Pipeline completo" in log_final:
+                        st.success("Últim Processar acabat.")
+
+                    with st.expander("Registre de l'últim Processar", expanded=False):
+                        st.code(log_final)
+
+                    st.subheader("Resum per client")
+                    st.caption(
+                        "S'han processat tots els clients (els que ja estaven al dia "
+                        "s'han saltat per idempotència)."
+                    )
+                    for fila in clientes:
+                        linias_cliente = [
+                            linia for linia in log_final.splitlines()
+                            if linia.startswith(f"{fila['carpeta']} ")
+                        ]
+                        tarjeta_cliente(fila, "final", lineas_log=linias_cliente)
+                    boton_obrir("Obrir portada", ruta_proyecto("clientes", "index.html"), key="final_portada")
 
 # ----------------------------------------------------------------------
 elif vista == "Revisió":
@@ -1994,59 +2156,70 @@ elif vista == "Revisió":
             "RECALCULAR", key="revisio_recalcular",
             type="primary" if (n_sin_recalcular > 0 or n_moguts_sense_recalcular > 0) else "secondary",
         ):
-            placeholder = st.empty()
-            buffer = ""
-            # Piso 11B: validar.py entra en la cadena -- las correccions.csv
-            # solo se aplican en memoria dentro de validar.py, asi que hace
-            # falta volver a correrlo para que una correccio "torni a passar
-            # l'examen". Sigue sin llamadas a la API (validar.py es pura
-            # logica Python), igual de gratis que sumar.py/informe.py.
-            #
-            # Piso 13P: bug de confiança trobat en directe -- si l'Excel
-            # (o l'informe) d'un client estava obert, sumar.py/informe.py
-            # ja el saltaven be (Piso 13G/13P) i seguien amb la resta, pero
-            # aquest bloc mai comprovava proceso.returncode ni guardava el
-            # buffer -- sempre acabava en "Recalculat." + st.rerun()
-            # immediat, que esborrava la pantalla ABANS que ningu pogues
-            # llegir l'AVISO. Mateix patró que "Processar" (mes amunt): es
-            # distingeix un crash de veritat (returncode != 0 -- atura la
-            # cadena, com ejecutar.py) d'un avis de fitxer bloquejat
-            # (returncode 0 pero "AVISO:" al log -- el lot ja ha continuat
-            # sol, regla 4, pero mai es disfressa d'exit). Cap dels dos
-            # casos fa rerun immediat: el missatge i el log s'han de poder
-            # llegir.
-            aturat_per_error = False
-            maquina_fallida = None
-            for maquina in ["validar.py", "sumar.py", "informe.py"]:
-                proceso = subprocess.Popen(
-                    [sys.executable, maquina],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, cwd=RAIZ_PROYECTO,
-                )
-                for linea in proceso.stdout:
-                    buffer += linea
-                    placeholder.code(buffer)
-                proceso.wait()
-                if proceso.returncode != 0:
-                    aturat_per_error = True
-                    maquina_fallida = maquina
-                    break
-
-            st.session_state["log_recalcular"] = buffer
-
-            if aturat_per_error:
+            # Piso 13S: RECALCULAR crida la MATEIXA cadena (validar->sumar->
+            # informe) sobre els MATEIXOS arxius que Processar -- mai a la
+            # vegada, per no arriscar una escriptura concurrent real.
+            candau_recalcular = candau_processar_viu()
+            if candau_recalcular:
                 st.error(
-                    f"{maquina_fallida} ha acabat amb un error (codi {proceso.returncode}) -- "
-                    f"aturant la cadena aquí. Revisa el registre de sota."
-                )
-            elif "AVISO:" in buffer:
-                st.warning(
-                    "Recalculat, PERÒ algun client no s'ha pogut actualitzar (Excel o informe "
-                    "obert?). Revisa el registre de sota abans de confiar en les xifres."
+                    f"Hi ha un Processar en marxa (iniciat per {candau_recalcular.get('qui')} a les "
+                    f"{candau_recalcular.get('data_inici')}) -- espera que acabi abans de Recalcular, "
+                    "per no escriure als mateixos arxius alhora."
                 )
             else:
-                st.success("Recalculat.")
-                st.rerun()
+                placeholder = st.empty()
+                buffer = ""
+                # Piso 11B: validar.py entra en la cadena -- las correccions.csv
+                # solo se aplican en memoria dentro de validar.py, asi que hace
+                # falta volver a correrlo para que una correccio "torni a passar
+                # l'examen". Sigue sin llamadas a la API (validar.py es pura
+                # logica Python), igual de gratis que sumar.py/informe.py.
+                #
+                # Piso 13P: bug de confiança trobat en directe -- si l'Excel
+                # (o l'informe) d'un client estava obert, sumar.py/informe.py
+                # ja el saltaven be (Piso 13G/13P) i seguien amb la resta, pero
+                # aquest bloc mai comprovava proceso.returncode ni guardava el
+                # buffer -- sempre acabava en "Recalculat." + st.rerun()
+                # immediat, que esborrava la pantalla ABANS que ningu pogues
+                # llegir l'AVISO. Mateix patró que "Processar" (mes amunt): es
+                # distingeix un crash de veritat (returncode != 0 -- atura la
+                # cadena, com ejecutar.py) d'un avis de fitxer bloquejat
+                # (returncode 0 pero "AVISO:" al log -- el lot ja ha continuat
+                # sol, regla 4, pero mai es disfressa d'exit). Cap dels dos
+                # casos fa rerun immediat: el missatge i el log s'han de poder
+                # llegir.
+                aturat_per_error = False
+                maquina_fallida = None
+                for maquina in ["validar.py", "sumar.py", "informe.py"]:
+                    proceso = subprocess.Popen(
+                        [sys.executable, maquina],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1, cwd=RAIZ_PROYECTO,
+                    )
+                    for linea in proceso.stdout:
+                        buffer += linea
+                        placeholder.code(buffer)
+                    proceso.wait()
+                    if proceso.returncode != 0:
+                        aturat_per_error = True
+                        maquina_fallida = maquina
+                        break
+
+                st.session_state["log_recalcular"] = buffer
+
+                if aturat_per_error:
+                    st.error(
+                        f"{maquina_fallida} ha acabat amb un error (codi {proceso.returncode}) -- "
+                        f"aturant la cadena aquí. Revisa el registre de sota."
+                    )
+                elif "AVISO:" in buffer:
+                    st.warning(
+                        "Recalculat, PERÒ algun client no s'ha pogut actualitzar (Excel o informe "
+                        "obert?). Revisa el registre de sota abans de confiar en les xifres."
+                    )
+                else:
+                    st.success("Recalculat.")
+                    st.rerun()
 
         if st.session_state["log_recalcular"]:
             with st.expander("Registre de l'últim Recalcular", expanded=False):

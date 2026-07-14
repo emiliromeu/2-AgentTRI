@@ -423,12 +423,24 @@ for fila in todos_clientes:
                 if otros:
                     motivos.append(f"factura duplicada: mismo proveedor+num_factura que {', '.join(otros)}")
 
-            # La retención sin columna en el llibre solo es un problema en rebudes
-            # (facturas de compra) -- en ingressos (liquidaciones de cooperativa)
-            # la retención es normal y se suma, no se marca a revisar.
-            retencion_cuota = datos.get("retencion_cuota")
-            if etiqueta == "rebudes" and retencion_cuota is not None and retencion_cuota > 0:
-                motivos.append("retención con cuota > 0: el llibre no tiene columna para representarla")
+            # Piso 13S: la regla vieja ("retención con cuota > 0 en rebudes
+            # -> REVISAR, el llibre no tiene columna") queda RETIRADA -- ara
+            # sumar.py SÍ té columna (% Ret./Retenció) tant a DESPESES com a
+            # INGRESSOS. La retención bien cuadrada ya no es una anomalía,
+            # es un dato mas. Se sustituye por el mismo xec aritmético que
+            # verificar_retencion() (app.py/sumar.py/informe.py) ya hacia
+            # como AVISO -- ahora tambien vive aqui como motivo de veritat,
+            # igual en los dos flujos (el xec no tiene direccion).
+            retencion_pct = datos.get("retencion_pct") or 0
+            retencion_cuota = datos.get("retencion_cuota") or 0
+            if retencion_pct or retencion_cuota:
+                base_total_retencion = sum((l.get("base") or 0) for l in lineas)
+                esperado_retencion = base_total_retencion * retencion_pct / 100
+                if abs(esperado_retencion - retencion_cuota) > TOLERANCIA:
+                    motivos.append(
+                        f"retención no cuadra: {base_total_retencion} × {retencion_pct}% = "
+                        f"{esperado_retencion:.2f}, pero retencion_cuota indica {retencion_cuota}"
+                    )
 
             # Piso 13K: contrapart determinista per NIF, no per posicio del
             # camp -- "proveedor" es siempre quien EMITE, pero en rebudes

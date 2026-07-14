@@ -197,11 +197,23 @@ extraidas_total = {"rebudes": 0, "ingressos": 0}
 saltadas_total = {"rebudes": 0, "ingressos": 0}
 con_error_total = {"rebudes": 0, "ingressos": 0}
 
+# Piso 13S: processar.stop -- comprovat ENTRE factures (mai a mitges d'una
+# crida a l'API). Aquest es el pas costos del pipeline (API de pagament),
+# per aixo es la maquina amb el xec mes fi -- ejecutar.py nomes comprova
+# ENTRE maquines, no te visibilitat de "quina factura toca ara".
+RAIZ_STOP = Path(__file__).resolve().parent
+RUTA_STOP = RAIZ_STOP / "processar.stop"
+aturat_per_stop = False
+
 # Bloque d -- bucle por cliente, luego por flujo, y dentro el bucle de siempre por archivo
 for fila in leer_clientes():
+    if aturat_per_stop:
+        break
     carpeta = fila["carpeta"]
 
     for etiqueta, origen_rel, destino_rel in FLUJOS:
+        if aturat_per_stop:
+            break
         origen = RUTAS_ORIGEN_PERSONALIZADAS.get((carpeta, etiqueta), origen_rel)
         carpeta_entrada = f"clientes/{carpeta}/{origen}"
         carpeta_salida = f"clientes/{carpeta}/{destino_rel}"
@@ -225,7 +237,17 @@ for fila in leer_clientes():
         saltadas = 0
         con_error = 0
 
-        for ruta_archivo in rutas_archivo:
+        for indice, ruta_archivo in enumerate(rutas_archivo):
+            if RUTA_STOP.exists():
+                pendientes = len(rutas_archivo) - indice
+                print(
+                    f"\nATURAT per petició de l'usuari a {carpeta}/{etiqueta} -- "
+                    f"{extraidas} processades aquí, {pendientes} pendents aquí (pot haver-hi més "
+                    "en altres clients/fluxos encara no visitats). Reprèn amb Processar quan vulguis."
+                )
+                aturat_per_stop = True
+                break
+
             nombre_archivo = os.path.basename(ruta_archivo)
             nombre_json = os.path.splitext(nombre_archivo)[0] + ".json"
             ruta_json = os.path.join(carpeta_salida, nombre_json)

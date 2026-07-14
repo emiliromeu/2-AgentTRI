@@ -5,3 +5,6 @@ __pycache__/
 .DS_Store
 arxivats/
 registre_destruccions.csv
+processar.lock
+processar.stop
+proces_log.txt

@@ -726,12 +726,16 @@ def sumar_bloque(facturas, decisiones):
     return sumas, total_ok, retencion_ok, revisar, descartados
 
 
-def escribir_bloque(ws, fila, titulo, sumas, con_retencion):
+def escribir_bloque(ws, fila, titulo, sumas, con_retencion, etiqueta_retencion="TOTAL RETENCIONS"):
     """Piso 12A: escribe solo la ESTRUCTURA (etiquetas, tipos de IVA
     presentes) -- las celdas de Base/Quota/Total/TOTAL RETENCIONS quedan en
     blanco, se rellenan mas tarde con formulas en escribir_formulas_bloque
     una vez se conoce el rango de filas de DETALL. Devuelve (fila,
-    info) -- info trae la posicion de cada celda que hay que rellenar."""
+    info) -- info trae la posicion de cada celda que hay que rellenar.
+
+    Piso 13S: etiqueta_retencion permet que DESPESES digui "Σ RETENCIONS
+    SUPORTADES" (les del lloguer, model 115) sense tocar el text ja
+    establert d'INGRESSOS ("TOTAL RETENCIONS")."""
     for col in range(1, 5):
         celda = ws.cell(row=fila, column=col)
         celda.font = ESTILO_ENCABEZADO
@@ -774,7 +778,7 @@ def escribir_bloque(ws, fila, titulo, sumas, con_retencion):
     if con_retencion:
         for col in range(1, 5):
             ws.cell(row=fila, column=col).border = BORDE_SUPERIOR
-        ws.cell(row=fila, column=1, value="TOTAL RETENCIONS").font = ESTILO_ENCABEZADO
+        ws.cell(row=fila, column=1, value=etiqueta_retencion).font = ESTILO_ENCABEZADO
         celda = ws.cell(row=fila, column=4)
         celda.font = ESTILO_ENCABEZADO
         celda.number_format = FORMATO_MONEDA
@@ -946,11 +950,16 @@ def escribir_formulas_resultat(ws, info, rango_g, rango_i, sumas_g, sumas_i):
     return comprobaciones
 
 
-COLUMNAS_DETALLE = ["Data", "Núm. factura", "Proveïdor", "NIF", "Base", "%IVA", "Quota", "Retenció", "Total", "Estat"]
+# Piso 13S: "% Ret." nova, "Retenció" renombrada "Retenció (€)" per
+# claredat -- desplaça Total (H->I->J) i Estat (I->J->K, literal a
+# _escribir_fila_detalle). Totes les fórmules =SUM() referencien
+# NOMÉS via aquestes constants, mai un literal cru -- canvi mecànic.
+COLUMNAS_DETALLE = ["Data", "Núm. factura", "Proveïdor", "NIF", "Base", "%IVA", "Quota", "% Ret.", "Retenció (€)", "Total", "Estat"]
 COLUMNA_BASE_DETALLE = "E"
 COLUMNA_QUOTA_DETALLE = "G"
-COLUMNA_RETENCIO_DETALLE = "H"
-COLUMNA_TOTAL_DETALLE = "I"
+COLUMNA_RETENCIO_PCT_DETALLE = "H"
+COLUMNA_RETENCIO_DETALLE = "I"
+COLUMNA_TOTAL_DETALLE = "J"
 
 
 def celda_fecha(ws, fila, columna, fecha_iso):
@@ -1047,15 +1056,18 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     celda_tipo.number_format = FORMATO_PORCENTAJE
     celda_cuota = ws.cell(row=fila, column=7, value=linea.get("cuota"))
     celda_cuota.number_format = FORMATO_MONEDA
-    celda_retencio = ws.cell(row=fila, column=8)
+    celda_retencio_pct = ws.cell(row=fila, column=8)
+    celda_retencio_pct.number_format = FORMATO_PORCENTAJE
+    celda_retencio = ws.cell(row=fila, column=9)
     celda_retencio.number_format = FORMATO_MONEDA
-    celda_total = ws.cell(row=fila, column=9)
+    celda_total = ws.cell(row=fila, column=10)
     celda_total.number_format = FORMATO_MONEDA
     if nombre not in nombres_ya_mostrados:
+        celda_retencio_pct.value = datos.get("retencion_pct") or None
         celda_retencio.value = datos.get("retencion_cuota") or None
         celda_total.value = datos.get("total")
         nombres_ya_mostrados.add(nombre)
-    ws.cell(row=fila, column=10, value=estado_mostrado)
+    ws.cell(row=fila, column=11, value=estado_mostrado)
 
     for col in range(1, len(COLUMNAS_DETALLE) + 1):
         ws.cell(row=fila, column=col).fill = relleno
@@ -1527,9 +1539,10 @@ for fila_cliente in leer_clientes():
         ws.column_dimensions["E"].width = 14
         ws.column_dimensions["F"].width = 10
         ws.column_dimensions["G"].width = 14
-        ws.column_dimensions["H"].width = 14
+        ws.column_dimensions["H"].width = 10
         ws.column_dimensions["I"].width = 14
-        ws.column_dimensions["J"].width = 12
+        ws.column_dimensions["J"].width = 14
+        ws.column_dimensions["K"].width = 12
 
         fila = escribir_titulo(ws, fila_cliente["nombre"], fila_cliente["nif"])
         pendientes = []
@@ -1539,11 +1552,16 @@ for fila_cliente in leer_clientes():
             # Piso 12A: 1a pasada -- estructura de RESULTAT/DESPESES/INGRESSOS,
             # celdas numericas en blanco (se rellenan en la 3a pasada, una vez
             # se conoce el rango exacto de filas de DETALL).
-            sumas_g, total_g, _, revisar_g, descartados_g = sumar_bloque(datos_trimestre["gastos"], decisiones)
+            sumas_g, total_g, retencion_g, revisar_g, descartados_g = sumar_bloque(datos_trimestre["gastos"], decisiones)
             sumas_i, total_i, retencion_i, revisar_i, descartados_i = sumar_bloque(datos_trimestre["ingresos"], decisiones)
 
             fila, info_resultat = escribir_resultat_estructura(ws, fila, sumas_g, sumas_i)
-            fila, info_g = escribir_bloque(ws, fila, "DESPESES", sumas_g, con_retencion=False)
+            # Piso 13S: DESPESES guanya la mateixa fila de retencions que
+            # INGRESSOS ja tenia -- les del lloguer (model 115), etiqueta
+            # propia perque no es confongui amb la d'INGRESSOS.
+            fila, info_g = escribir_bloque(
+                ws, fila, "DESPESES", sumas_g, con_retencion=True, etiqueta_retencion="Σ RETENCIONS SUPORTADES",
+            )
             fila, info_i = escribir_bloque(ws, fila, "INGRESSOS", sumas_i, con_retencion=True)
 
             n_ok_g = len(datos_trimestre["gastos"]) - len(revisar_g) - len(descartados_g)
@@ -1598,7 +1616,7 @@ for fila_cliente in leer_clientes():
             )
 
             comprobaciones = []
-            comprobaciones += escribir_formulas_bloque(ws, info_g, rango_g, sumas_g, total_g, 0)
+            comprobaciones += escribir_formulas_bloque(ws, info_g, rango_g, sumas_g, total_g, retencion_g)
             comprobaciones += escribir_formulas_bloque(ws, info_i, rango_i, sumas_i, total_i, retencion_i)
             comprobaciones += escribir_formulas_resultat(ws, info_resultat, rango_g, rango_i, sumas_g, sumas_i)
             comprobaciones_por_hoja[nombre_hoja] = comprobaciones
