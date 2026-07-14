@@ -542,11 +542,33 @@ def guardar_archivo(archivo_subido, carpeta_destino):
 def guardar_y_reportar(archivos, carpeta_destino):
     """Piso 13D: factoritzat perque "Afegir factures" el crida des de
     tres llocs (desar normal, i els dos camins de la guardia de lots
-    despistats) sense repetir el mateix bloc tres cops."""
-    nombres_finales = [guardar_archivo(a, carpeta_destino) for a in archivos]
-    st.success(f"S'han desat {len(nombres_finales)} arxius a `{carpeta_destino}`:")
-    for nombre in nombres_finales:
-        st.write(f"- {nombre}")
+    despistats) sense repetir el mateix bloc tres cops.
+
+    Piso 13R: bug real reproduit en directe -- st.file_uploader no es
+    buida sol despres de desar, i l'avis de "es un lot?" es recalcula
+    igual a cada rerun mentre el fitxer hi segueixi, aixi que tornava
+    a estar visible i clicable DESPRES d'un desat ja fet amb exit.
+    Cada clic addicional (doble clic, confusio, qualsevol rerun futur)
+    tornava a cridar guardar_archivo, que MAI sobreescriu -- creava
+    una copia _2/_3... del mateix contingut. Registre per file_id
+    (identificador estable de Streamlit per a AQUESTA pujada concreta,
+    Piso 13R) a session_state: cada archivo es desa EXACTAMENT una
+    vegada per sessio, independentment de quants cops es re-renderitzi
+    o es re-clicki el mateix avis (regla 5: idempotent)."""
+    ja_desats = st.session_state.setdefault("afegir_ja_desats", set())
+    nombres_finales = []
+    for a in archivos:
+        if a.file_id in ja_desats:
+            continue
+        nombres_finales.append(guardar_archivo(a, carpeta_destino))
+        ja_desats.add(a.file_id)
+
+    if nombres_finales:
+        st.success(f"S'han desat {len(nombres_finales)} arxius a `{carpeta_destino}`:")
+        for nombre in nombres_finales:
+            st.write(f"- {nombre}")
+    else:
+        st.info("Aquests arxius ja s'havien desat abans en aquesta sessió -- no s'ha tornat a escriure res.")
 
 
 @st.cache_data(show_spinner=False)
@@ -694,6 +716,8 @@ TRADUCCIONES_MOTIVO = [
      "el client no apareix ni com a emissor ni com a receptor"),
     ("las dos partes son el cliente", "les dues parts són el client"),
     ("importe numérico ilegible en", "import numèric il·legible a"),
+    ("marcada como exenta pero tiene líneas con IVA -- corrige las líneas (tipo 0, cuota 0) o desmarca exenta",
+     "marcada com a exempta però té línies amb IVA -- corregeix les línies (tipus 0, quota 0) o desmarca exempta"),
 ]
 
 
@@ -1336,65 +1360,21 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                     escribir_decision(carpeta_cliente, nombre, "descartar", nota, qui)
                     st.rerun(scope="fragment")
 
-            # Piso 13L: acció discreta "Moure a l'altre flux" -- nomes a
-            # les targetes PENDENT (el cas d'UNA factura pujada al canal
-            # equivocat). Mai automàtic: el suggeriment (quan aplica)
-            # nomes fa mes visible el mateix formulari, la persona
-            # sempre firma el clic.
-            if prefijo == "pendent":
-                flujo_contrari = "Vendes" if flujo == "rebudes" else "Compres"
-                if sembla_factura_de_lautre_flux(datos, flujo, nif_client):
-                    st.warning(f"Sembla una factura de {flujo_contrari.upper()} — vols moure-la?")
-                with st.form(key=f"form_moure_{prefijo}_{nombre}", border=False):
-                    motiu_moure = st.text_input("Motiu (opcional)", key=f"{prefijo}_motiu_moure_{nombre}")
-                    click_moure = st.form_submit_button(f"Moure a {flujo_contrari}")
-                if click_moure:
-                    migrar_lot.moure_de_flux(
-                        os.path.basename(carpeta_cliente), [(nombre_base, flujo)],
-                        motiu_moure or "Moviment individual des de Revisió", qui,
-                    )
-                    st.toast(f"Mogut a {flujo_contrari}. Recalcula per refer els veredictes.", icon="↔️")
-                    st.rerun(scope="fragment")
-
-            # Piso 13Q: "Moure a un altre client" -- l'error de destinació
-            # (factura pujada al CLIENT equivocat, no nomes al flux
-            # equivocat). Disponible a Pendents I OK (a diferència de
-            # "Moure a l'altre flux", que nomes te sentit a Pendents). Mai
-            # automàtic: el suggeriment per NIF (validar.py, quan aplica)
-            # nomes preselecciona el mateix formulari, la persona sempre
-            # firma el clic.
-            clients_altres = [f for f in leer_clientes() if f["carpeta"] != os.path.basename(carpeta_cliente)]
-            if clients_altres:
-                if datos.get("suggerit_carpeta"):
-                    st.warning(f"Sembla de **{datos.get('suggerit_nom')}** — vols moure-ho?")
-                opcions_client_desti = {f"{f['nombre']} ({f['carpeta']})": f["carpeta"] for f in clients_altres}
-                etiquetes_client = list(opcions_client_desti.keys())
-                index_defecte = next(
-                    (i for i, k in enumerate(etiquetes_client) if opcions_client_desti[k] == datos.get("suggerit_carpeta")),
-                    0,
-                )
-                with st.form(key=f"form_moure_client_{prefijo}_{nombre}", border=False):
-                    eleccio_desti = st.selectbox(
-                        "Moure a un altre client", etiquetes_client, index=index_defecte,
-                        key=f"{prefijo}_client_desti_{nombre}",
-                    )
-                    flux_desti_mostrat = st.radio(
-                        "Flux al client destí", ["Compres", "Vendes"],
-                        index=0 if flujo == "rebudes" else 1,
-                        horizontal=True, key=f"{prefijo}_flux_desti_{nombre}",
-                    )
-                    motiu_client = st.text_input("Motiu (opcional)", key=f"{prefijo}_motiu_client_{nombre}")
-                    click_moure_client = st.form_submit_button("Moure a aquest client")
-                if click_moure_client:
-                    carpeta_desti = opcions_client_desti[eleccio_desti]
-                    flux_desti_intern = "rebudes" if flux_desti_mostrat == "Compres" else "ingressos"
-                    migrar_lot.moure_a_client(
-                        os.path.basename(carpeta_cliente), carpeta_desti, [(nombre_base, flujo)],
-                        motiu_client or "Moviment individual des de Revisió (altre client)", qui,
-                        flujo_desti=flux_desti_intern,
-                    )
-                    st.toast(f"Mogut a {eleccio_desti}. Recalcula per refer els veredictes.", icon="↔️")
-                    st.rerun(scope="fragment")
+        # Piso 13R: endreça -- Aprovar/Descartar es queden sempre visibles
+        # (l'acció principal), la resta d'eines (Corregir camps, Moure a
+        # l'altre flux, Moure a un altre client, Piso 13N/13Q) es reculen
+        # dins d'un "⋮ Més accions" per no saturar la targeta. Cap flux
+        # intern canvia -- mateixes crides, mateixos paràmetres, només
+        # canvia on viuen els widgets. Els avisos de suggeriment es queden
+        # SEMPRE visibles fora del popover (avisar no és una acció que
+        # calgui amagar, i sense decisió encara té sentit oferir-los).
+        flujo_contrari = "Vendes" if flujo == "rebudes" else "Compres"
+        clients_altres = [f for f in leer_clientes() if f["carpeta"] != os.path.basename(carpeta_cliente)]
+        if not decision:
+            if prefijo == "pendent" and sembla_factura_de_lautre_flux(datos, flujo, nif_client):
+                st.warning(f"Sembla una factura de {flujo_contrari.upper()} — vols moure-la?")
+            if datos.get("suggerit_carpeta"):
+                st.warning(f"Sembla de **{datos.get('suggerit_nom')}** — vols moure-ho?")
 
         # Piso 11B: "Corregir camps" -- capa de correccio, mai edita
         # extraidas/. Camps precarregats amb el valor ACTUAL; nomes es
@@ -1474,6 +1454,28 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                         "Correcció guardada — la fitxa tornarà a passar la xarxa en Recalcular.",
                         icon="✅",
                     )
+                    # Piso 13R: avís inline (mai bloquejant -- la doctrina no
+                    # canvia, validar.py fa l'examen de veritat en el proper
+                    # Recalcular) si la correcció deixa la fitxa amb
+                    # exenta=true i alguna línia amb IVA. st.toast en comptes
+                    # de st.warning perquè el st.rerun() de sota esborraria
+                    # qualsevol missatge normal abans que es pogués llegir
+                    # (mateixa lliçó que Piso 13P).
+                    exenta_final = valors_nous["exenta"].strip().lower() in ("true", "1", "si", "sí")
+
+                    def _es_positiu(texto):
+                        try:
+                            return float(texto) > 0
+                        except (TypeError, ValueError):
+                            return False
+
+                    te_iva = any(_es_positiu(t) or _es_positiu(c) for _, t, b, c in lineas_nuevas)
+                    if exenta_final and te_iva:
+                        st.toast(
+                            "Marcada com a exempta amb línies d'IVA -- tornarà a REVISAR fins "
+                            "que corregeixis les línies (tipus 0, quota 0) o desmarquis exempta.",
+                            icon="⚠️",
+                        )
                     # Piso 13H: comprobado en directe -- st.rerun(scope="fragment")
                     # NO tanca el dialog quan es crida des de dins (el "obert"
                     # d'un dialog viu fora del propi re-render del fragment).
@@ -1481,8 +1483,54 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                     # paga aquest cost (es rara, no cada clic).
                     st.rerun()
 
-        if st.button("Corregir camps", key=f"{prefijo}_obrir_correccio_{nombre}"):
-            dialog_corregir_camps()
+        with st.popover("⋮ Més accions"):
+            if not decision and prefijo == "pendent":
+                st.markdown("**Moure a l'altre flux**")
+                with st.form(key=f"form_moure_{prefijo}_{nombre}", border=False):
+                    motiu_moure = st.text_input("Motiu (opcional)", key=f"{prefijo}_motiu_moure_{nombre}")
+                    click_moure = st.form_submit_button(f"Moure a {flujo_contrari}")
+                if click_moure:
+                    migrar_lot.moure_de_flux(
+                        os.path.basename(carpeta_cliente), [(nombre_base, flujo)],
+                        motiu_moure or "Moviment individual des de Revisió", qui,
+                    )
+                    st.toast(f"Mogut a {flujo_contrari}. Recalcula per refer els veredictes.", icon="↔️")
+                    st.rerun(scope="fragment")
+
+            if not decision and clients_altres:
+                st.markdown("**Moure a un altre client**")
+                opcions_client_desti = {f"{f['nombre']} ({f['carpeta']})": f["carpeta"] for f in clients_altres}
+                etiquetes_client = list(opcions_client_desti.keys())
+                index_defecte = next(
+                    (i for i, k in enumerate(etiquetes_client) if opcions_client_desti[k] == datos.get("suggerit_carpeta")),
+                    0,
+                )
+                with st.form(key=f"form_moure_client_{prefijo}_{nombre}", border=False):
+                    eleccio_desti = st.selectbox(
+                        "Moure a un altre client", etiquetes_client, index=index_defecte,
+                        key=f"{prefijo}_client_desti_{nombre}",
+                    )
+                    flux_desti_mostrat = st.radio(
+                        "Flux al client destí", ["Compres", "Vendes"],
+                        index=0 if flujo == "rebudes" else 1,
+                        horizontal=True, key=f"{prefijo}_flux_desti_{nombre}",
+                    )
+                    motiu_client = st.text_input("Motiu (opcional)", key=f"{prefijo}_motiu_client_{nombre}")
+                    click_moure_client = st.form_submit_button("Moure a aquest client")
+                if click_moure_client:
+                    carpeta_desti = opcions_client_desti[eleccio_desti]
+                    flux_desti_intern = "rebudes" if flux_desti_mostrat == "Compres" else "ingressos"
+                    migrar_lot.moure_a_client(
+                        os.path.basename(carpeta_cliente), carpeta_desti, [(nombre_base, flujo)],
+                        motiu_client or "Moviment individual des de Revisió (altre client)", qui,
+                        flujo_desti=flux_desti_intern,
+                    )
+                    st.toast(f"Mogut a {eleccio_desti}. Recalcula per refer els veredictes.", icon="↔️")
+                    st.rerun(scope="fragment")
+
+            st.markdown("**Corregir camps**")
+            if st.button("Corregir camps", key=f"{prefijo}_obrir_correccio_{nombre}"):
+                dialog_corregir_camps()
 
 
 @st.fragment
@@ -1513,19 +1561,24 @@ def bloque_decidit(archivo, carpeta_cliente, qui):
     if n_revertits:
         st.caption(f"↩️ Decisió desfeta ({n_revertits} {'vegada' if n_revertits == 1 else 'vegades'}) anteriorment")
 
-    with st.form(key=f"form_desfer_{archivo}", border=False):
-        motiu_desfer = st.text_input("Motiu (opcional)", key=f"desfer_motiu_{archivo}")
-        click_desfer = st.form_submit_button("Desfer aquesta decisió")
-    if click_desfer:
-        # Piso 13M: guàrdia explícita -- revertir_decision ja recomprova
-        # si encara hi ha decisió efectiva just abans d'escriure (evita
-        # una condició de cursa si es clica dues vegades seguides).
-        revertida = revertir_decision(carpeta_cliente, archivo, motiu_desfer, qui)
-        if revertida is None:
-            st.error("No hi ha res a revertir.")
-        else:
-            st.toast(f"Decisió desfeta — {archivo} torna a pendents.", icon="↩️")
-            st.rerun()
+    # Piso 13R: mateix "⋮ Més accions" que tarjeta_revisio -- una sola
+    # acció aquí (Desfer), però mateix criteri d'endreça consistent a
+    # tota la vista Revisió. No es converteix aquesta fila en targeta
+    # amb vora -- només l'acció es reculla darrere el popover.
+    with st.popover("⋮ Més accions"):
+        with st.form(key=f"form_desfer_{archivo}", border=False):
+            motiu_desfer = st.text_input("Motiu (opcional)", key=f"desfer_motiu_{archivo}")
+            click_desfer = st.form_submit_button("Desfer aquesta decisió")
+        if click_desfer:
+            # Piso 13M: guàrdia explícita -- revertir_decision ja recomprova
+            # si encara hi ha decisió efectiva just abans d'escriure (evita
+            # una condició de cursa si es clica dues vegades seguides).
+            revertida = revertir_decision(carpeta_cliente, archivo, motiu_desfer, qui)
+            if revertida is None:
+                st.error("No hi ha res a revertir.")
+            else:
+                st.toast(f"Decisió desfeta — {archivo} torna a pendents.", icon="↩️")
+                st.rerun()
 
 
 @st.fragment

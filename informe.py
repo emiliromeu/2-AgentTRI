@@ -548,6 +548,10 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
     )
     avisos_html = '<span class="etiqueta-verificacio">⚠ verificació</span>' if tiene_avisos else ""
 
+    # Piso 13R: mateix patró additiu que ABONAMENT/verificació -- marca
+    # visual, cap suma ni lògica canvia (el cub propi viu a sumar.py).
+    exempta_html = '<span class="etiqueta-exempta">EXEMPTA</span>' if datos.get("exenta") else ""
+
     decisio_html = ""
     nota_decisio_html = ""
     if accion_decision == "aprovar":
@@ -585,6 +589,7 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         <span class="etiqueta-estado">{esc(estado)}</span>
         {abonament_html}
         {avisos_html}
+        {exempta_html}
         {decisio_html}
         {corregit_html}
         <h3>{esc(datos.get("contrapart_nom"))}</h3>
@@ -895,11 +900,12 @@ p.resultat-iva .nota { font-size: 0.8rem; font-style: italic; color: #555; }
 .tarjeta-izq { flex: 1; }
 .tarjeta-der { flex: 1; display: flex; align-items: center; justify-content: center; }
 .tarjeta-der img { max-width: 100%; max-height: 500px; border-radius: 4px; }
-.etiqueta-tipo, .etiqueta-estado, .etiqueta-abonament, .etiqueta-verificacio, .etiqueta-decisio {
+.etiqueta-tipo, .etiqueta-estado, .etiqueta-abonament, .etiqueta-verificacio, .etiqueta-decisio, .etiqueta-exempta {
   display: inline-block; padding: 0.15rem 0.6rem; border-radius: 4px;
   font-size: 0.8rem; font-weight: bold; background: #fff; margin-right: 0.3rem; }
 .etiqueta-abonament { background: #FBE5D6; color: #833C00; }
 .etiqueta-verificacio { background: #FFC7CE; color: #9C0006; }
+.etiqueta-exempta { background: #E4DFEC; color: #5C3D8C; }
 .etiqueta-decisio.aprovat { background: #E2EFDA; color: #375623; }
 .etiqueta-decisio.corregit { background: #D9E8F5; color: #0D3D6B; }
 .lineas-iva { margin: 0.3rem 0; padding-left: 1.2rem; }
@@ -928,6 +934,7 @@ table.errors tbody tr { background: #FFC7CE; }
   .etiqueta-tipo, .etiqueta-estado { background: #333; }
   .etiqueta-abonament { background: #4a3423; color: #f0c090; }
   .etiqueta-verificacio { background: #4a2323; color: #f0a0a0; }
+  .etiqueta-exempta { background: #3a2e4a; color: #c9a8f0; }
   .etiqueta-decisio.aprovat { background: #22331f; color: #b7d7a8; }
   .etiqueta-decisio.corregit { background: #1a2e42; color: #a9cdf0; }
   table.errors tbody tr { background: #4a2323; }

@@ -351,6 +351,19 @@ for fila in todos_clientes:
                         f"línea {i}: {base} × {tipo}% = {esperado:.2f}, pero cuota indica {cuota}"
                     )
 
+            # Piso 13R: coherencia exenta -- antes "exenta" no se contrastaba
+            # contra las propias líneas de IVA, así que una ficha podía
+            # quedar marcada exenta con líneas de IVA real por debajo,
+            # silenciosamente incoherente. corregir sigue sin autoaprobarse
+            # (la doctrina de aplicar_correcciones no cambia): esta ficha
+            # simplemente vuelve a REVISAR con el motivo de abajo hasta que
+            # las líneas queden a 0 o se desmarque exenta.
+            if datos.get("exenta") and any((l.get("tipo_iva") or 0) > 0 or (l.get("cuota") or 0) > 0 for l in lineas):
+                motivos.append(
+                    "marcada como exenta pero tiene líneas con IVA -- corrige las líneas "
+                    "(tipo 0, cuota 0) o desmarca exenta"
+                )
+
             total = datos.get("total")
             if total is not None:
                 suma = sum((l.get("base") or 0) + (l.get("cuota") or 0) for l in lineas)

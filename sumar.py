@@ -685,9 +685,16 @@ def sumar_bloque(facturas, decisiones):
     'aprovar' hace que una REVISAR cuente como si fuera OK; 'descartar'
     hace que nunca cuente (ni las OK), y va a su propio bloque. Sin
     decisiones.csv, o vacio, el comportamiento es identico al de
-    siempre (ninguna entrada tiene decision)."""
+    siempre (ninguna entrada tiene decision).
+
+    Piso 13R: las fichas exenta=true forman su propio cubo "exenta"
+    (solo base, la cuota de una exenta coherente siempre es 0 -- lo
+    garantiza la validacion nueva de validar.py antes de que la ficha
+    pueda llegar a OK/aprovar) -- separado del cubo del tipo 0% real,
+    que sigue significando exactamente lo mismo que antes."""
     sumas = {tipo: {"base": 0.0, "cuota": 0.0} for tipo in TIPOS_IVA}
     sumas["otros"] = {"base": 0.0, "cuota": 0.0}
+    sumas["exenta"] = {"base": 0.0, "cuota": 0.0}
     total_ok = 0.0
     retencion_ok = 0.0
     revisar = []
@@ -707,7 +714,10 @@ def sumar_bloque(facturas, decisiones):
 
         for linea in datos.get("lineas_iva") or []:
             tipo = linea.get("tipo_iva")
-            clave = tipo if tipo in TIPOS_IVA else "otros"
+            if datos.get("exenta"):
+                clave = "exenta"
+            else:
+                clave = tipo if tipo in TIPOS_IVA else "otros"
             sumas[clave]["base"] += linea.get("base") or 0
             sumas[clave]["cuota"] += linea.get("cuota") or 0
         total_ok += datos.get("total") or 0
@@ -736,10 +746,14 @@ def escribir_bloque(ws, fila, titulo, sumas, con_retencion):
     tipos_a_escribir = list(TIPOS_IVA)
     if sumas["otros"]["base"] or sumas["otros"]["cuota"]:
         tipos_a_escribir.append("otros")
+    # Piso 13R: cub propi "exenta" -- nomes apareix si hi ha alguna
+    # base exempta a sumar, mateix criteri que "otros".
+    if sumas["exenta"]["base"] or sumas["exenta"]["cuota"]:
+        tipos_a_escribir.append("exenta")
 
     filas_por_tipo = {}
     for tipo in tipos_a_escribir:
-        etiqueta_tipo = "ALTRES" if tipo == "otros" else tipo
+        etiqueta_tipo = "ALTRES" if tipo == "otros" else ("EXEMPTA" if tipo == "exenta" else tipo)
         ws.cell(row=fila, column=1, value=etiqueta_tipo)
         ws.cell(row=fila, column=2).number_format = FORMATO_MONEDA
         ws.cell(row=fila, column=3).number_format = FORMATO_MONEDA
@@ -1012,6 +1026,12 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     if resumen_historial:
         estado_mostrado += f" | HISTORIAL: {resumen_historial}"
 
+    # Piso 13R: mateix patró additiu -- marca visible al DETALL quan la
+    # fitxa és exenta=true (el cub propi ja les agrupa, aquesta és la
+    # marca a nivell de fila individual).
+    if datos.get("exenta"):
+        estado_mostrado += " | EXEMPTA"
+
     celda_fecha(ws, fila, 1, datos.get("fecha_factura"))
     celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
     if ruta_original:
@@ -1092,12 +1112,24 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
     for nombre, datos in facturas_suman:
         for linea in (datos.get("lineas_iva") or [{}]):
             tipo = linea.get("tipo_iva")
-            clave_tipo = tipo if tipo in TIPOS_IVA else "otros"
+            # Piso 13R: una fitxa exenta=true forma el seu propi cub
+            # "exenta", separat del tipus real de la línia -- mateixa
+            # classificació que sumar_bloque, imprescindible perque els
+            # rangs de files quadrin amb els =SUM() dels blocs.
+            if datos.get("exenta"):
+                clave_tipo = "exenta"
+            else:
+                clave_tipo = tipo if tipo in TIPOS_IVA else "otros"
             lineas_que_suman.append((clave_tipo, nombre, datos, linea))
 
     orden_tipo = {tipo: i for i, tipo in enumerate(TIPOS_IVA)}
     orden_tipo["otros"] = len(TIPOS_IVA)
-    lineas_que_suman.sort(key=lambda x: orden_tipo.get(x[0], 999))
+    orden_tipo["exenta"] = len(TIPOS_IVA) + 1
+    # Piso 13R: ordre per data DINS de cada cub -- l'ordre per tipus es
+    # manté com a clau PRIMÀRIA (imprescindible pels rangs contigus que
+    # necessiten els =SUM() dels blocs), la data només desempata dins.
+    # Les fitxes sense fecha_factura cauen sempre al final del seu cub.
+    lineas_que_suman.sort(key=lambda x: (orden_tipo.get(x[0], 999), x[2].get("fecha_factura") or "9999-99-99"))
 
     nombres_ya_mostrados = set()
     rango_tipos = {}
@@ -1121,6 +1153,9 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
     fila += 1  # fila en blanco
 
     if facturas_pendientes:
+        # Piso 13R: ordre per data -- sense rangs ni formules que en
+        # depenguin (aquest bloc no suma res), un sort pla n'hi ha prou.
+        facturas_pendientes.sort(key=lambda np: np[1].get("fecha_factura") or "9999-99-99")
         ws.cell(row=fila, column=1, value="PENDENTS — NO SUMEN").font = ESTILO_ENCABEZADO
         for col in range(1, len(COLUMNAS_DETALLE) + 1):
             ws.cell(row=fila, column=col).fill = RELLENO_AVISO
@@ -1536,6 +1571,9 @@ for fila_cliente in leer_clientes():
 
         # 2a pasada: PENDENT DE REVISIÓ y DESCARTATS, igual que siempre.
         if pendientes:
+            # Piso 13R: ordre per data -- aquesta taula no suma res, cap
+            # rang ni formula en depèn.
+            pendientes.sort(key=lambda p: p[1].get("fecha_factura") or "9999-99-99")
             fila = escribir_pendientes(ws, fila, pendientes, carpeta_cliente)
 
         for nombre, datos, decision in descartados_g:
