@@ -92,6 +92,7 @@ amb un boto "Actualitzar comptadors", mai fingint un numero en viu.
 
 import csv
 import hashlib
+import html
 import io
 import json
 import os
@@ -388,6 +389,59 @@ def arxivar_cliente(fila):
     return destino, n_archivos
 
 
+def regenerar_index_clientes():
+    """Piso 13V: reescriu clientes/index.html NOMES amb els clients
+    actuals de leer_clientes() -- es crida just despres d'arxivar un
+    client perque la portada mai ensenyi un enllaç trencat fins al
+    proper Processar/RECALCULAR. A proposit NO crida informe.py: aixo
+    tocaria l'informe_2026.html de TOTS els clients i n'esborraria el
+    semafor "sense recalcular" sense que sumar.py s'hagi tornat a
+    executar de veritat. Estil propi i minim (no el d'informe.py,
+    pensat per a tarjetes/conciliacio que aquesta portada no fa
+    servir) -- cap re-execucio de cap maquina, nomes os.path.exists()."""
+    filas_taula = ""
+    for f in leer_clientes():
+        carpeta = f["carpeta"]
+        carpeta_cliente = ruta_proyecto("clientes", carpeta)
+        ruta_informe = os.path.join(carpeta_cliente, "informe_2026.html")
+        ruta_excel = os.path.join(carpeta_cliente, "sumatorios_2026.xlsx")
+        enlace_informe = (
+            f'<a href="{carpeta}/informe_2026.html">Informe</a>'
+            if os.path.exists(ruta_informe) else "no disponible"
+        )
+        enlace_excel = (
+            f'<a href="{carpeta}/sumatorios_2026.xlsx" download>Obrir l\'Excel</a>'
+            if os.path.exists(ruta_excel) else "no disponible"
+        )
+        filas_taula += (
+            f"<tr><td>{html.escape(f['nombre'])}</td><td>{html.escape(f['nif'])}</td>"
+            f"<td>{enlace_informe}</td><td>{enlace_excel}</td></tr>"
+        )
+    index_html = f"""<!DOCTYPE html>
+<html lang="ca">
+<head>
+<meta charset="utf-8">
+<title>Clients — Agent TRIMESTRE</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2rem; }}
+table {{ border-collapse: collapse; width: 100%; }}
+th, td {{ border: 1px solid #ccc; padding: 0.4rem 0.8rem; text-align: left; }}
+th {{ background: #D9E1F2; }}
+</style>
+</head>
+<body>
+  <h1>Clients</h1>
+  <p>Actualitzat el {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+  <table>
+    <thead><tr><th>Client</th><th>NIF</th><th>Informe</th><th>Excel</th></tr></thead>
+    <tbody>{filas_taula}</tbody>
+  </table>
+</body>
+</html>"""
+    with open(ruta_proyecto("clientes", "index.html"), "w", encoding="utf-8") as f:
+        f.write(index_html)
+
+
 # =======================================================================
 # Piso 13N: DESTRUIR -- l'unic verb del projecte que esborra de veritat
 # (os.remove/shutil.rmtree). Fins ara tot movia (arxivar_cliente,
@@ -554,6 +608,36 @@ def destruir_client_arxivat(nombre_carpeta_arxivada, motiu, qui):
     escribir_registre_destruccio(ruta_registro, nombre_carpeta_arxivada, detall, motiu, qui)
 
     shutil.rmtree(ruta_origen)
+
+
+def auto_recalcular_sumar_informe():
+    """Piso 13V: crida sumar.py + informe.py (gratuïts, sense API) just
+    despres de destruir documents d'un client actiu -- perque l'informe
+    no quedi desquadrat (comptava com a "presents" arxius que ja no hi
+    son) fins al proper Processar/RECALCULAR manual. Mateix candau que
+    RECALCULAR (app.py, vista Revisió): si hi ha un Processar en marxa,
+    s'avisa i se salta -- la destrucció ja s'ha fet, nomes queda
+    pendent recalcular a ma des de Revisió."""
+    candau = candau_processar_viu()
+    if candau:
+        st.warning(
+            f"Hi ha un Processar en marxa (iniciat per {candau.get('qui')} a les "
+            f"{candau.get('data_inici')}) -- sumar+informe NO s'han pogut actualitzar sols. "
+            "Recalcula des de Revisió quan acabi."
+        )
+        return
+    with st.spinner("Actualitzant sumar+informe..."):
+        for maquina in ["sumar.py", "informe.py"]:
+            proceso = subprocess.run(
+                [sys.executable, maquina], cwd=RAIZ_PROYECTO, capture_output=True, text=True,
+            )
+            if proceso.returncode != 0:
+                st.error(
+                    f"{maquina} ha fallat en actualitzar-se (codi {proceso.returncode}). "
+                    "Recalcula des de Revisió."
+                )
+                return
+    st.success("sumar+informe actualitzats.")
 
 
 def ruta_destino_factures(carpeta, destino, es_lot=False):
@@ -822,6 +906,9 @@ def tarjeta_cliente(fila, prefijo, lineas_log=None):
                 except RuntimeError as e:
                     st.error(str(e))
                 else:
+                    # Piso 13V: la portada mai ha de mostrar aquest
+                    # client mort ni un enllaç trencat, ni un segon.
+                    regenerar_index_clientes()
                     st.success(f"Client arxivat a `{destino}`. Recuperable manualment.")
                     st.rerun()
 
@@ -1150,23 +1237,53 @@ def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui, nota=None):
     return destino
 
 
-def contar_decisiones_sin_recalcular(carpeta_cliente, decisiones):
+def contar_decisiones_sin_recalcular(carpeta_cliente):
     """Compara la fecha de cada decision (formato propio, parseable --
     la escribe escribir_decision) contra el mtime de informe_2026.html.
     Sin informe todavia, cuentan todas. Fechas no parseables (alguien
-    las escribio a mano en otro formato) no cuentan -- no rompen nada."""
+    las escribio a mano en otro formato) no cuentan -- no rompen nada.
+
+    Piso 13V: abans rebia el diccionari ja col·lapsat de
+    cargar_decisiones() (que POPA qualsevol archiu la última fila del
+    qual sigui "revertir") -- un Desfer era estructuralment invisible
+    per aquest comptador. Ara llegeix decisions.csv EN CRU i compta
+    QUALSEVOL fila (aprovar/descartar/revertir), mateix patró que
+    contar_moviments_sense_recalcular i contar_retirs_sense_recalcular."""
+    ruta_decisions = os.path.join(carpeta_cliente, "decisions.csv")
+    if not os.path.exists(ruta_decisions):
+        return 0
     ruta_informe = os.path.join(carpeta_cliente, "informe_2026.html")
-    if not os.path.exists(ruta_informe):
-        return len(decisiones)
-    mtime_informe = os.path.getmtime(ruta_informe)
+    mtime_informe = os.path.getmtime(ruta_informe) if os.path.exists(ruta_informe) else 0
     contador = 0
-    for fila in decisiones.values():
-        try:
-            marca = datetime.strptime(fila.get("data", ""), "%Y-%m-%d %H:%M:%S").timestamp()
-        except ValueError:
-            continue
-        if marca > mtime_informe:
-            contador += 1
+    with open(ruta_decisions, encoding="utf-8") as f:
+        for fila in csv.DictReader(f):
+            try:
+                marca = datetime.strptime(fila.get("data", ""), "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                continue
+            if marca > mtime_informe:
+                contador += 1
+    return contador
+
+
+def contar_retirs_sense_recalcular(carpeta_cliente):
+    """Piso 13V: mateix patró exacte que contar_moviments_sense_recalcular
+    però per a errors_retirats/registre.csv (escrit per retirar_error) --
+    abans Retirar no tenia cap senyal de "sense recalcular"."""
+    ruta_registre = os.path.join(carpeta_cliente, "errors_retirats", "registre.csv")
+    if not os.path.exists(ruta_registre):
+        return 0
+    ruta_informe = os.path.join(carpeta_cliente, "informe_2026.html")
+    mtime_informe = os.path.getmtime(ruta_informe) if os.path.exists(ruta_informe) else 0
+    contador = 0
+    with open(ruta_registre, encoding="utf-8") as f:
+        for fila in csv.DictReader(f):
+            try:
+                marca = datetime.strptime(fila.get("data", ""), "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                continue
+            if marca > mtime_informe:
+                contador += 1
     return contador
 
 
@@ -1305,6 +1422,28 @@ def estado_revision_cliente(carpeta):
         "decisiones": decisiones,
         "errores": [("rebudes", r) for r in errores_gastos] + [("ingressos", r) for r in errores_ingresos],
     }
+
+
+# Piso 13V: etiqueta visible (nom + color) per a cada flux intern --
+# "rebudes"/"ingressos" son els noms de carpeta de tota la vida, mai
+# ensenyats a l'usuari; "Compres"/"Vendes" son el que ja es veu a la
+# resta de la interfície (ex. ruta_destino_factures).
+FLUX_ETIQUETA = {"rebudes": "🔵 Compres", "ingressos": "🟢 Vendes"}
+FLUX_INTERN = {"Compres": "rebudes", "Vendes": "ingressos"}
+
+
+def selector_flux(key_base):
+    """Piso 13V: control segmentat "Tots | Compres | Vendes" per a cada
+    secció paginada de Revisió -- conviu amb entrada_cerca (els dos
+    filtres s'apliquen junts sobre el conjunt COMPLET, abans de
+    paginar()). key_base ha de portar la carpeta del client (mateix
+    motiu que entrada_cerca: en canviar de client, la selecció de
+    l'anterior no s'ha d'arrossegar). Retorna "rebudes"/"ingressos" o
+    None (= Tots, cap filtre)."""
+    seleccio = st.segmented_control(
+        "Flux", ["Tots", "Compres", "Vendes"], default="Tots", required=True, key=f"{key_base}_flux",
+    )
+    return FLUX_INTERN.get(seleccio)
 
 
 def normalizar_cerca(texto):
@@ -1455,7 +1594,8 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
             # "proveedor" era el propi client, no el seu comprador.
             st.markdown(f"**{datos.get('contrapart_nom')}**")
             st.caption(
-                f"NIF {datos.get('contrapart_nif')} · Factura {datos.get('num_factura')} · "
+                f"{FLUX_ETIQUETA[flujo]} · NIF {datos.get('contrapart_nif')} · "
+                f"Factura {datos.get('num_factura')} · "
                 f"{datos.get('fecha_factura')} · estat {datos.get('estado')}"
             )
             for linea in datos.get("lineas_iva") or []:
@@ -1826,7 +1966,7 @@ def tarjeta_error(flujo, ruta, carpeta_cliente, qui, prefijo):
     muntada) abans de mostrar el boto."""
     nombre = os.path.basename(ruta)
     with st.container(border=True, key=f"tarjeta_error_{prefijo}_{nombre}"):
-        st.markdown(f"**[{flujo.upper()}] {nombre}**")
+        st.markdown(f"**{FLUX_ETIQUETA[flujo]} {nombre}**")
         if not os.path.exists(ruta):
             st.success("✓ Arxiu retirat.")
         else:
@@ -2372,13 +2512,20 @@ elif vista == "Revisió":
         n_pendents = len(estado["pendents"])
         n_errores = len(estado["errores"])
         n_decidits = len(estado["decisiones"])
-        n_sin_recalcular = contar_decisiones_sin_recalcular(estado["carpeta_cliente"], estado["decisiones"])
+        # Piso 13V: desglossat per flux -- calculat sempre sobre el
+        # conjunt SENCER (mai el filtrat pel selector_flux de sota).
+        n_pendents_compres = sum(1 for _, _, f, _ in estado["pendents"] if f == "rebudes")
+        n_pendents_vendes = n_pendents - n_pendents_compres
+        n_sin_recalcular = contar_decisiones_sin_recalcular(estado["carpeta_cliente"])
         n_moguts_sense_recalcular = contar_moviments_sense_recalcular(estado["carpeta_cliente"])
+        n_retirs_sense_recalcular = contar_retirs_sense_recalcular(estado["carpeta_cliente"])
 
         st.subheader(
-            f"{n_pendents} pendents per decidir · {n_errores} errors per resoldre · "
+            f"{n_pendents} pendents per decidir ({n_pendents_compres} compres · {n_pendents_vendes} vendes) · "
+            f"{n_errores} errors per resoldre · "
             f"{n_decidits} decidits · {n_sin_recalcular} decisions noves sense recalcular · "
-            f"{n_moguts_sense_recalcular} moguts sense recalcular"
+            f"{n_moguts_sense_recalcular} moguts sense recalcular · "
+            f"{n_retirs_sense_recalcular} retirs sense recalcular"
         )
 
         # Piso 11C: cada targeta es un @st.fragment -- Aprovar/Descartar/
@@ -2400,7 +2547,9 @@ elif vista == "Revisió":
 
         if st.button(
             "RECALCULAR", key="revisio_recalcular",
-            type="primary" if (n_sin_recalcular > 0 or n_moguts_sense_recalcular > 0) else "secondary",
+            type="primary" if (
+                n_sin_recalcular > 0 or n_moguts_sense_recalcular > 0 or n_retirs_sense_recalcular > 0
+            ) else "secondary",
         ):
             # Piso 13S: RECALCULAR crida la MATEIXA cadena (validar->sumar->
             # informe) sobre els MATEIXOS arxius que Processar -- mai a la
@@ -2485,16 +2634,21 @@ elif vista == "Revisió":
         # "no existeix aprovar-ho-tot sense selecció" literalment: no hi
         # ha res a clicar, no un boto desactivat.
         st.markdown(f"### Pendents sense decisió ({n_pendents})")
+        flux_pendents = selector_flux(f"revisio_flux_pendents_{carpeta}")
+        pendents_en_flux = (
+            [(n, d, f, o) for n, d, f, o in estado["pendents"] if f == flux_pendents]
+            if flux_pendents else estado["pendents"]
+        )
         cerca_pendents = entrada_cerca("🔍 Cercar a Pendents", f"revisio_cerca_pendents_{carpeta}")
         if cerca_pendents:
             q_pendents = normalizar_cerca(cerca_pendents)
             pendents_mostrats = [
-                (n, d, f, o) for n, d, f, o in estado["pendents"]
+                (n, d, f, o) for n, d, f, o in pendents_en_flux
                 if q_pendents in texto_buscable_ficha(n, d)
             ]
-            st.caption(f"{len(pendents_mostrats)} resultats de {len(estado['pendents'])}")
+            st.caption(f"{len(pendents_mostrats)} resultats de {len(pendents_en_flux)}")
         else:
-            pendents_mostrats = estado["pendents"]
+            pendents_mostrats = pendents_en_flux
 
         if not pendents_mostrats:
             st.caption("Cap pendent sense decidir." if not cerca_pendents else "Cap resultat per aquesta cerca.")
@@ -2558,15 +2712,19 @@ elif vista == "Revisió":
             oks_ordenadas = sorted(
                 oks_no_decididas, key=lambda t: 0 if avisos_verificacion_ficha(t[1]) else 1
             )
+            flux_oks = selector_flux(f"revisio_flux_oks_{carpeta}")
+            oks_en_flux = (
+                [(n, d, f, o) for n, d, f, o in oks_ordenadas if f == flux_oks] if flux_oks else oks_ordenadas
+            )
             cerca_oks = entrada_cerca("🔍 Cercar a Fitxes OK", f"revisio_cerca_oks_{carpeta}")
             if cerca_oks:
                 q_oks = normalizar_cerca(cerca_oks)
                 oks_mostrades = [
-                    (n, d, f, o) for n, d, f, o in oks_ordenadas if q_oks in texto_buscable_ficha(n, d)
+                    (n, d, f, o) for n, d, f, o in oks_en_flux if q_oks in texto_buscable_ficha(n, d)
                 ]
-                st.caption(f"{len(oks_mostrades)} resultats de {len(oks_ordenadas)}")
+                st.caption(f"{len(oks_mostrades)} resultats de {len(oks_en_flux)}")
             else:
-                oks_mostrades = oks_ordenadas
+                oks_mostrades = oks_en_flux
 
             if not oks_mostrades:
                 st.caption("Sense fitxes OK." if not cerca_oks else "Cap resultat per aquesta cerca.")
@@ -2576,16 +2734,20 @@ elif vista == "Revisió":
                     tarjeta_revisio(nombre, datos, origen, estado["carpeta_cliente"], qui, "ok", flujo, fila_cliente["nif"])
 
         st.markdown(f"### Errors ({n_errores})")
+        flux_errors = selector_flux(f"revisio_flux_errors_{carpeta}")
+        errores_en_flux = (
+            [(f, r) for f, r in estado["errores"] if f == flux_errors] if flux_errors else estado["errores"]
+        )
         cerca_errors = entrada_cerca("🔍 Cercar a Errors", f"revisio_cerca_errors_{carpeta}")
         if cerca_errors:
             q_errors = normalizar_cerca(cerca_errors)
             errores_mostrats = [
-                (f, r) for f, r in estado["errores"]
+                (f, r) for f, r in errores_en_flux
                 if q_errors in normalizar_cerca(f"{os.path.basename(r)} {f}")
             ]
-            st.caption(f"{len(errores_mostrats)} resultats de {len(estado['errores'])}")
+            st.caption(f"{len(errores_mostrats)} resultats de {len(errores_en_flux)}")
         else:
-            errores_mostrats = estado["errores"]
+            errores_mostrats = errores_en_flux
 
         if not errores_mostrats:
             st.caption("Cap error per resoldre." if not cerca_errors else "Cap resultat per aquesta cerca.")
@@ -2644,6 +2806,15 @@ elif vista == "Revisió":
             grups_ordenats[clau] = membres_amb_data
 
         st.markdown(f"### Duplicats ({len(grups_duplicats)} grups)")
+        flux_duplicats = selector_flux(f"revisio_flux_duplicats_{carpeta}")
+        if flux_duplicats:
+            # Piso 13V: mateix criteri que la cerca de sota -- un grup
+            # sobreviu si ALGUN membre coincideix amb el flux triat.
+            grups_ordenats = {
+                clau: membres for clau, membres in grups_ordenats.items()
+                if any(f == flux_duplicats for _, f, _ in membres)
+            }
+        n_grups_en_flux = len(grups_ordenats)
         cerca_duplicats = entrada_cerca("🔍 Cercar a Duplicats", f"revisio_cerca_duplicats_{carpeta}")
         if cerca_duplicats:
             q_duplicats = normalizar_cerca(cerca_duplicats)
@@ -2653,7 +2824,7 @@ elif vista == "Revisió":
                 clau: membres for clau, membres in grups_ordenats.items()
                 if any(q_duplicats in texto_buscable_ficha(n, d) for n, d, f, o in grups_duplicats[clau])
             }
-            st.caption(f"{len(grups_ordenats)} grups de {len(grups_duplicats)}")
+            st.caption(f"{len(grups_ordenats)} grups de {n_grups_en_flux}")
 
         if not grups_ordenats:
             st.caption("Cap duplicat detectat." if not cerca_duplicats else "Cap resultat per aquesta cerca.")
@@ -2686,7 +2857,7 @@ elif vista == "Revisió":
                         )
                         etiqueta_rol = "original (més antiga)" if i == 0 else "còpia"
                         seleccio[nombre_dup] = st.checkbox(
-                            f"{nombre_dup} — {data_llegible} — {flujo_dup} — {etiqueta_rol}",
+                            f"{nombre_dup} — {data_llegible} — {FLUX_ETIQUETA[flujo_dup]} — {etiqueta_rol}",
                             value=(i != 0),
                             key=f"dup_sel_{carpeta}_{nombre_dup}",
                         )
@@ -2746,7 +2917,9 @@ elif vista == "Manteniment":
                 st.session_state["qui_manteniment_confirmat"] = None
                 st.rerun()
 
-        tab_docs, tab_client = st.tabs(["Documents d'un client", "Client arxivat"])
+        tab_docs, tab_client, tab_massiva = st.tabs(
+            ["Documents d'un client", "Client arxivat", "Destrucció massiva"]
+        )
 
         with tab_docs:
             clientes_m = leer_clientes()
@@ -2811,6 +2984,10 @@ elif vista == "Manteniment":
                                     f"{len(destruits)} documents destruïts. "
                                     f"Certificat escrit a clientes/{carpeta_m}/registre_destruccions.csv."
                                 )
+                                # Piso 13V: l'informe comptava aquests
+                                # arxius com a "presents" -- s'actualitza
+                                # sol, gratuit i en segons.
+                                auto_recalcular_sumar_informe()
                             if omesos:
                                 st.error(
                                     "Alguns documents ja no eren destruïbles i s'han saltat: "
@@ -2855,3 +3032,102 @@ elif vista == "Manteniment":
                         else:
                             st.success(f"Client arxivat '{eleccion_arx}' destruït. Certificat a l'arrel del projecte.")
                             st.rerun()
+
+        with tab_massiva:
+            st.caption(
+                "Destrueix TOT l'arxivat i tot el retirat/descartat destruïble de TOTS els "
+                "clients d'un sol cop -- res viu es toca (nomes el que candidatos_destruccio "
+                "ja considera retirat/descartat, i clients ja arxivats)."
+            )
+
+            carpeta_arxivats_m = ruta_proyecto("arxivats")
+            carpetes_arxivades_totes = sorted(
+                n for n in os.listdir(carpeta_arxivats_m) if os.path.isdir(os.path.join(carpeta_arxivats_m, n))
+            ) if os.path.isdir(carpeta_arxivats_m) else []
+
+            resum_arxivats = []
+            bytes_arxivats_total = 0
+            for nom_carpeta in carpetes_arxivades_totes:
+                ruta_arx_m = os.path.join(carpeta_arxivats_m, nom_carpeta)
+                n_arx = sum(len(archivos) for _, _, archivos in os.walk(ruta_arx_m))
+                bytes_arx_m = sum(
+                    os.path.getsize(os.path.join(dirpath, f))
+                    for dirpath, _, archivos in os.walk(ruta_arx_m) for f in archivos
+                )
+                resum_arxivats.append((nom_carpeta, n_arx, bytes_arx_m))
+                bytes_arxivats_total += bytes_arx_m
+
+            resum_documents = []
+            bytes_documents_total = 0
+            n_documents_total = 0
+            for f in leer_clientes():
+                retirats_f, descartats_f = candidatos_destruccio(f["carpeta"])
+                items_f = retirats_f + descartats_f
+                if not items_f:
+                    continue
+                bytes_f = sum(
+                    os.path.getsize(ruta) for it in items_f for ruta in it["rutas"] if os.path.exists(ruta)
+                )
+                resum_documents.append((f["carpeta"], items_f, bytes_f))
+                bytes_documents_total += bytes_f
+                n_documents_total += len(items_f)
+
+            bytes_total = bytes_arxivats_total + bytes_documents_total
+
+            if not carpetes_arxivades_totes and n_documents_total == 0:
+                st.info("Res per destruir -- cap client arxivat ni cap document retirat/descartat.")
+            else:
+                st.warning(
+                    f"Es destruiran {len(carpetes_arxivades_totes)} clients arxivats i "
+                    f"{n_documents_total} documents retirats/descartats de {len(resum_documents)} clients "
+                    f"({bytes_total / (1024 * 1024):.2f} MB en total)."
+                )
+                with st.expander("Detall"):
+                    for nom, n, b in resum_arxivats:
+                        st.write(f"- Client arxivat **{nom}**: {n} arxius ({b / (1024 * 1024):.2f} MB)")
+                    for carpeta_d, items_f, b in resum_documents:
+                        st.write(f"- **{carpeta_d}**: {len(items_f)} documents retirats/descartats ({b / (1024 * 1024):.2f} MB)")
+
+                motiu_massiu = st.text_input("Motiu (obligatori)", key="destruir_motiu_massiu")
+                confirmacio_massiva = st.text_input(
+                    'Escriu "DESTRUIR TOT" per confirmar', key="destruir_confirmacio_massiva"
+                )
+                # Piso 13V: mateix criteri de sempre -- mai disabled=
+                # lligat a un text_input solt (regla 10). "DESTRUIR TOT"
+                # (no "DESTRUIR") a proposit: confirmar aquest abast tan
+                # ampli no pot compartir la mateixa paraula que un sol
+                # document.
+                if st.button("DESTRUIR TOT L'ARXIVAT I RETIRAT", key="destruir_boto_massiu"):
+                    if not motiu_massiu:
+                        st.error("Cal escriure un motiu per destruir.")
+                    elif confirmacio_massiva != "DESTRUIR TOT":
+                        st.error('Cal escriure exactament "DESTRUIR TOT" per confirmar.')
+                    else:
+                        n_clients_arxivats_destruits = 0
+                        for nom_carpeta, _, _ in resum_arxivats:
+                            try:
+                                destruir_client_arxivat(nom_carpeta, motiu_massiu, qui_m)
+                                n_clients_arxivats_destruits += 1
+                            except RuntimeError as e:
+                                st.error(str(e))
+
+                        n_docs_destruits_total = 0
+                        for carpeta_d, items_f, _ in resum_documents:
+                            destruits_d, omesos_d = destruir_documentos(carpeta_d, items_f, motiu_massiu, qui_m)
+                            n_docs_destruits_total += len(destruits_d)
+                            if omesos_d:
+                                st.error(
+                                    f"{carpeta_d}: alguns documents ja no eren destruïbles i s'han saltat: "
+                                    + "; ".join(f"{n} ({m})" for n, m in omesos_d)
+                                )
+
+                        st.success(
+                            f"{n_clients_arxivats_destruits} clients arxivats i {n_docs_destruits_total} "
+                            "documents destruïts. Certificats escrits."
+                        )
+                        if n_docs_destruits_total > 0:
+                            # Piso 13V: mateix motiu que a "Documents d'un
+                            # client" -- l'informe pot haver quedat
+                            # desquadrat pels arxius que ja no hi son.
+                            auto_recalcular_sumar_informe()
+                        st.rerun()

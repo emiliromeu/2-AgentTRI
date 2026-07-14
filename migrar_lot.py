@@ -179,6 +179,14 @@ def moure_a_client(carpeta_origen, carpeta_desti, documentos, motiu, qui, flujo_
 
         es_va_moure = movido_original or fitxa_movida
         if es_va_moure:
+            # Piso 13V: abans NOMES s'escrivia al desti -- l'origen mai
+            # quedava marcat com "sense recalcular" tot i haver perdut
+            # un document. Mateixa fila (mateix "de"/"a") als DOS csv.
+            escribir_moviment_flux(
+                carpeta_origen, nombre_base,
+                f"{carpeta_origen}:{flujo_origen}", f"{carpeta_desti}:{flujo_final}",
+                motiu, qui, data_actual,
+            )
             escribir_moviment_flux(
                 carpeta_desti, nombre_base,
                 f"{carpeta_origen}:{flujo_origen}", f"{carpeta_desti}:{flujo_final}",
