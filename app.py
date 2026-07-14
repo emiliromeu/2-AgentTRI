@@ -1580,6 +1580,8 @@ if not os.path.isdir(ruta_proyecto("clientes")):
 
 if "log_proces" not in st.session_state:
     st.session_state["log_proces"] = None
+if "log_recalcular" not in st.session_state:
+    st.session_state["log_recalcular"] = None
 
 st.title("Agent TRIMESTRE")
 vista = st.sidebar.radio("Navegació", ["Clients", "Afegir factures", "Processar", "Revisió", "Manteniment"])
@@ -1846,6 +1848,22 @@ elif vista == "Revisió":
             # falta volver a correrlo para que una correccio "torni a passar
             # l'examen". Sigue sin llamadas a la API (validar.py es pura
             # logica Python), igual de gratis que sumar.py/informe.py.
+            #
+            # Piso 13P: bug de confiança trobat en directe -- si l'Excel
+            # (o l'informe) d'un client estava obert, sumar.py/informe.py
+            # ja el saltaven be (Piso 13G/13P) i seguien amb la resta, pero
+            # aquest bloc mai comprovava proceso.returncode ni guardava el
+            # buffer -- sempre acabava en "Recalculat." + st.rerun()
+            # immediat, que esborrava la pantalla ABANS que ningu pogues
+            # llegir l'AVISO. Mateix patró que "Processar" (mes amunt): es
+            # distingeix un crash de veritat (returncode != 0 -- atura la
+            # cadena, com ejecutar.py) d'un avis de fitxer bloquejat
+            # (returncode 0 pero "AVISO:" al log -- el lot ja ha continuat
+            # sol, regla 4, pero mai es disfressa d'exit). Cap dels dos
+            # casos fa rerun immediat: el missatge i el log s'han de poder
+            # llegir.
+            aturat_per_error = False
+            maquina_fallida = None
             for maquina in ["validar.py", "sumar.py", "informe.py"]:
                 proceso = subprocess.Popen(
                     [sys.executable, maquina],
@@ -1856,8 +1874,30 @@ elif vista == "Revisió":
                     buffer += linea
                     placeholder.code(buffer)
                 proceso.wait()
-            st.success("Recalculat.")
-            st.rerun()
+                if proceso.returncode != 0:
+                    aturat_per_error = True
+                    maquina_fallida = maquina
+                    break
+
+            st.session_state["log_recalcular"] = buffer
+
+            if aturat_per_error:
+                st.error(
+                    f"{maquina_fallida} ha acabat amb un error (codi {proceso.returncode}) -- "
+                    f"aturant la cadena aquí. Revisa el registre de sota."
+                )
+            elif "AVISO:" in buffer:
+                st.warning(
+                    "Recalculat, PERÒ algun client no s'ha pogut actualitzar (Excel o informe "
+                    "obert?). Revisa el registre de sota abans de confiar en les xifres."
+                )
+            else:
+                st.success("Recalculat.")
+                st.rerun()
+
+        if st.session_state["log_recalcular"]:
+            with st.expander("Registre de l'últim Recalcular", expanded=False):
+                st.code(st.session_state["log_recalcular"])
 
         col1, col2 = st.columns(2)
         with col1:

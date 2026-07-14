@@ -57,6 +57,11 @@ Piso 13K: la targeta mostra contrapart_nom/contrapart_nif (calculats
 per validar.py per NIF), no "proveedor"/"nif_proveedor" a seques --
 en ingressos on el client es l'emissor (factura propia), abans
 sortia el propi client en comptes del seu comprador.
+
+Piso 13P: guàrdia de fitxer bloquejat (mateix patró que sumar.py,
+Piso 13G) al voltant de l'escriptura de l'informe -- abans, si
+l'HTML estava obert, informe.py explotava sense capturar i es
+perdien TOTS els clients restants del bucle, no nomes aquest.
 """
 
 import base64
@@ -1079,8 +1084,17 @@ for fila_cliente in leer_clientes():
 </html>"""
 
     ruta_html = f"{carpeta_cliente}/informe_2026.html"
-    with open(ruta_html, "w", encoding="utf-8") as f:
-        f.write(html_final)
+    # Piso 13P: mateixa guàrdia que sumar.py (Piso 13G) -- si l'informe
+    # esta obert en un editor/visor que el bloqueja, abans es trencava
+    # TOT informe.py sense capturar (pitjor que sumar.py: es perdien
+    # tots els clients restants del bucle, no nomes aquest). El lot
+    # mai mor -- es salta aquest client i es continua.
+    try:
+        with open(ruta_html, "w", encoding="utf-8") as f:
+            f.write(html_final)
+    except PermissionError:
+        print(f"AVISO: {carpeta} -- no s'ha pogut escriure {ruta_html}. Tanca l'informe del client abans de recalcular.")
+        continue
 
     print(f"{carpeta} / informe: {n_tarjetas} tarjetas")
     print(f"Escrito: {ruta_html}")
