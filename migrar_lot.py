@@ -134,6 +134,61 @@ def moure_de_flux(carpeta, documentos, motiu, qui):
     return resultados
 
 
+def moure_a_client(carpeta_origen, carpeta_desti, documentos, motiu, qui, flujo_desti=None):
+    """Piso 13Q: com moure_de_flux, pero cap a un client DIFERENT --
+    l'error de destinació és pujar la factura al client equivocat, no
+    nomes al flux equivocat. documentos: llista de (nombre_base,
+    flujo_origen). Si flujo_desti es None, es queda al MATEIX flux al
+    client nou (nomes canvia el client); si es dona, tambe canvia de
+    flux en el mateix pas.
+
+    No es toca moure_de_flux -- les tres crides existents (app.py)
+    depenen del seu comportament actual, format de moviments_flux.csv
+    inclos. Per distingir un moviment ENTRE clients d'un moviment de
+    flux sense afegir cap columna al csv (que ja existeix a
+    producció): aqui "de"/"a" es guarden com "carpeta:flux" (ex.
+    "davinstal:rebudes") en comptes del nom pla del flux -- app.py ho
+    reconeix mirant si hi ha ":" i ho tradueix per mostrar-ho."""
+    data_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    resultados = []
+    for nombre_base, flujo_origen in documentos:
+        flujo_final = flujo_desti or flujo_origen
+        origen_orig, origen_extr, origen_val = config_flujo(carpeta_origen, flujo_origen)
+        destino_orig, destino_extr, _ = config_flujo(carpeta_desti, flujo_final)
+
+        candidatos_origen = [ruta_cliente(carpeta_origen, origen_orig)]
+        if flujo_origen == "rebudes":
+            candidatos_origen.append(ruta_cliente(carpeta_origen, "rebudes/procesadas"))
+
+        movido_original = False
+        for carpeta_candidata in candidatos_origen:
+            for ext in EXTENSIONES_ORIGINAL:
+                origen = os.path.join(carpeta_candidata, nombre_base + ext)
+                if os.path.exists(origen):
+                    destino = os.path.join(ruta_cliente(carpeta_desti, destino_orig), nombre_base + ext)
+                    mover(origen, destino)
+                    movido_original = True
+
+        origen_json = ruta_cliente(carpeta_origen, origen_extr, nombre_base + ".json")
+        destino_json = ruta_cliente(carpeta_desti, destino_extr, nombre_base + ".json")
+        fitxa_movida = mover(origen_json, destino_json)
+
+        ruta_validada_vieja = ruta_cliente(carpeta_origen, origen_val, nombre_base + ".json")
+        if os.path.exists(ruta_validada_vieja):
+            os.remove(ruta_validada_vieja)
+
+        es_va_moure = movido_original or fitxa_movida
+        if es_va_moure:
+            escribir_moviment_flux(
+                carpeta_desti, nombre_base,
+                f"{carpeta_origen}:{flujo_origen}", f"{carpeta_desti}:{flujo_final}",
+                motiu, qui, data_actual,
+            )
+        resultados.append((nombre_base, es_va_moure))
+
+    return resultados
+
+
 if __name__ == "__main__":
     # Piso 13B: ancla el cwd a la carpeta del propio script -- ver
     # trocear.py. Nomes aqui (mode terminal): les funcions d'amunt ja

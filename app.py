@@ -693,6 +693,7 @@ TRADUCCIONES_MOTIVO = [
     ("el cliente no aparece ni como emisor ni como receptor",
      "el client no apareix ni com a emissor ni com a receptor"),
     ("las dos partes son el cliente", "les dues parts són el client"),
+    ("importe numérico ilegible en", "import numèric il·legible a"),
 ]
 
 
@@ -1059,6 +1060,21 @@ def obtener_moviment(carpeta_cliente, nombre_base):
     return ultimo
 
 
+def formatar_moviment_costat(valor):
+    """Piso 13Q: moviments_flux.csv guarda "carpeta:flux" quan el
+    moviment ha estat entre CLIENTS diferents (migrar_lot.moure_a_client)
+    i nomes el nom pla del flux quan ha estat dins del mateix client
+    (moure_de_flux, sense canvis -- cap moviment antic es reescriu).
+    Aquesta funció tradueix el primer format a "Nom (flux)" per mostrar-ho;
+    el segon es retorna tal qual."""
+    valor = valor or ""
+    if ":" not in valor:
+        return valor
+    carpeta_val, flux_val = valor.split(":", 1)
+    nom = next((f["nombre"] for f in leer_clientes() if f["carpeta"] == carpeta_val), carpeta_val)
+    return f"{nom} ({flux_val})"
+
+
 def sembla_factura_de_lautre_flux(datos, flujo, nif_client):
     """Piso 13L: senyal (mai automàtic, regla 10 en positiu) -- només
     ben definit per a rebudes: si el motiu d'identitat ha saltat I el
@@ -1254,19 +1270,39 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
         # l'estat que va passar el bucle exterior.
         if moviment:
             motiu_mostrat = f" — _{moviment.get('motiu')}_" if moviment.get("motiu") else ""
+            de_mostrat = formatar_moviment_costat(moviment.get("de"))
+            a_mostrat = formatar_moviment_costat(moviment.get("a"))
             st.info(
-                f"↔️ Mogut de {moviment.get('de')} a {moviment.get('a')} per {moviment.get('qui')} "
+                f"↔️ Mogut de {de_mostrat} a {a_mostrat} per {moviment.get('qui')} "
                 f"el {moviment.get('data')}{motiu_mostrat} · Recalcula per refer els veredictes."
             )
             with st.form(key=f"form_tornar_{prefijo}_{nombre}", border=False):
                 motiu_tornar = st.text_input("Motiu (opcional)", key=f"{prefijo}_motiu_tornar_{nombre}")
-                click_tornar = st.form_submit_button(f"Tornar a {moviment.get('de')}")
+                click_tornar = st.form_submit_button(f"Tornar a {de_mostrat}")
             if click_tornar:
-                migrar_lot.moure_de_flux(
-                    os.path.basename(carpeta_cliente), [(nombre_base, moviment.get("a"))],
-                    motiu_tornar or "Moviment individual des de Revisió (tornada)", qui,
-                )
-                st.toast(f"Tornat a {moviment.get('de')}. Recalcula per refer els veredictes.", icon="↩️")
+                # Piso 13Q: "a" amb ":" vol dir que el moviment va ser
+                # ENTRE clients (moure_a_client) -- la tornada ha de fer
+                # el mateix camí a l'inrevés. Sense ":" es el format pla
+                # d'un moviment de flux (moure_de_flux), tal com sempre.
+                a_valor = moviment.get("a")
+                if ":" in a_valor:
+                    carpeta_actual_mov, flux_actual_mov = a_valor.split(":", 1)
+                    de_valor = moviment.get("de")
+                    if ":" in de_valor:
+                        carpeta_origen_mov, flux_origen_mov = de_valor.split(":", 1)
+                    else:
+                        carpeta_origen_mov, flux_origen_mov = os.path.basename(carpeta_cliente), de_valor
+                    migrar_lot.moure_a_client(
+                        carpeta_actual_mov, carpeta_origen_mov, [(nombre_base, flux_actual_mov)],
+                        motiu_tornar or "Moviment individual des de Revisió (tornada)", qui,
+                        flujo_desti=flux_origen_mov,
+                    )
+                else:
+                    migrar_lot.moure_de_flux(
+                        os.path.basename(carpeta_cliente), [(nombre_base, a_valor)],
+                        motiu_tornar or "Moviment individual des de Revisió (tornada)", qui,
+                    )
+                st.toast(f"Tornat a {de_mostrat}. Recalcula per refer els veredictes.", icon="↩️")
                 st.rerun(scope="fragment")
 
         historial = historial_decisiones(carpeta_cliente, nombre)
@@ -1318,6 +1354,46 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                         motiu_moure or "Moviment individual des de Revisió", qui,
                     )
                     st.toast(f"Mogut a {flujo_contrari}. Recalcula per refer els veredictes.", icon="↔️")
+                    st.rerun(scope="fragment")
+
+            # Piso 13Q: "Moure a un altre client" -- l'error de destinació
+            # (factura pujada al CLIENT equivocat, no nomes al flux
+            # equivocat). Disponible a Pendents I OK (a diferència de
+            # "Moure a l'altre flux", que nomes te sentit a Pendents). Mai
+            # automàtic: el suggeriment per NIF (validar.py, quan aplica)
+            # nomes preselecciona el mateix formulari, la persona sempre
+            # firma el clic.
+            clients_altres = [f for f in leer_clientes() if f["carpeta"] != os.path.basename(carpeta_cliente)]
+            if clients_altres:
+                if datos.get("suggerit_carpeta"):
+                    st.warning(f"Sembla de **{datos.get('suggerit_nom')}** — vols moure-ho?")
+                opcions_client_desti = {f"{f['nombre']} ({f['carpeta']})": f["carpeta"] for f in clients_altres}
+                etiquetes_client = list(opcions_client_desti.keys())
+                index_defecte = next(
+                    (i for i, k in enumerate(etiquetes_client) if opcions_client_desti[k] == datos.get("suggerit_carpeta")),
+                    0,
+                )
+                with st.form(key=f"form_moure_client_{prefijo}_{nombre}", border=False):
+                    eleccio_desti = st.selectbox(
+                        "Moure a un altre client", etiquetes_client, index=index_defecte,
+                        key=f"{prefijo}_client_desti_{nombre}",
+                    )
+                    flux_desti_mostrat = st.radio(
+                        "Flux al client destí", ["Compres", "Vendes"],
+                        index=0 if flujo == "rebudes" else 1,
+                        horizontal=True, key=f"{prefijo}_flux_desti_{nombre}",
+                    )
+                    motiu_client = st.text_input("Motiu (opcional)", key=f"{prefijo}_motiu_client_{nombre}")
+                    click_moure_client = st.form_submit_button("Moure a aquest client")
+                if click_moure_client:
+                    carpeta_desti = opcions_client_desti[eleccio_desti]
+                    flux_desti_intern = "rebudes" if flux_desti_mostrat == "Compres" else "ingressos"
+                    migrar_lot.moure_a_client(
+                        os.path.basename(carpeta_cliente), carpeta_desti, [(nombre_base, flujo)],
+                        motiu_client or "Moviment individual des de Revisió (altre client)", qui,
+                        flujo_desti=flux_desti_intern,
+                    )
+                    st.toast(f"Mogut a {eleccio_desti}. Recalcula per refer els veredictes.", icon="↔️")
                     st.rerun(scope="fragment")
 
         # Piso 11B: "Corregir camps" -- capa de correccio, mai edita
@@ -1647,9 +1723,10 @@ elif vista == "Afegir factures":
     if not clientes:
         st.info("Primer cal donar d'alta un client a la pestanya 'Clients'.")
     else:
-        opciones = {f"{f['nombre']} ({f['carpeta']})": f["carpeta"] for f in clientes}
+        opciones = {f"{f['nombre']} ({f['carpeta']})": f for f in clientes}
         eleccion = st.selectbox("Client", list(opciones.keys()))
-        carpeta = opciones[eleccion]
+        fila_afegir = opciones[eleccion]
+        carpeta = fila_afegir["carpeta"]
 
         # Piso 13D: tercer desti -- "Lot d'escaner". format_func desacobla
         # el valor intern ("Lot") del text llarg mostrat, per no haver de
@@ -1677,54 +1754,77 @@ elif vista == "Afegir factures":
             if tipus_lot is None:
                 st.info("Selecciona si el lot és de compres o de vendes abans de pujar el PDF.")
 
-        tipos_permitidos = ["pdf"] if destino == "Lot" else EXTENSIONES_PERMITIDAS
-        archivos = st.file_uploader(
-            "Arrossega els arxius aquí",
-            type=tipos_permitidos,
-            accept_multiple_files=True,
-            disabled=(destino == "Lot" and tipus_lot is None),
-        )
-
-        # Piso 13D: guardia de lots despistats -- nomes te sentit si
-        # l'usuari NO ha triat ja "Lot d'escaner" expressament. Mira
-        # cada PDF en memoria (mai es desa res a disc encara).
-        sospitos = None
-        if destino in ("Compres", "Vendes"):
-            for a in archivos or []:
-                if os.path.splitext(a.name)[1].lower() == ".pdf":
-                    try:
-                        n_pag = len(PdfReader(io.BytesIO(a.getvalue())).pages)
-                    except Exception:
-                        continue  # PDF no llegible -- no es el moment de bloquejar
-                    if n_pag > 3:
-                        sospitos = (a.name, n_pag)
-                        break
-
-        if sospitos:
-            nombre_sospitos, n_pag = sospitos
-            st.warning(f"Aquest PDF ({nombre_sospitos}) té {n_pag} pàgines — és un lot d'escàner?")
-            col_si, col_no = st.columns(2)
-            with col_si:
-                confirmar_lot = st.button("Sí, és un lot", key="lot_confirmar")
-            with col_no:
-                confirmar_solta = st.button("No, és una factura llarga", key="lot_descartar")
-            if confirmar_lot:
-                # Piso 13K: abans "Lot" literal, ignorant el flux triat --
-                # ara respecta destino (Compres/Vendes) i nomes marca
-                # es_lot=True per triar el moll corresponent.
-                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino, es_lot=True))
-            elif confirmar_solta:
-                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino))
-        else:
+        # Piso 13Q: mentre "Lot" encara no te tipus triat, el desti real
+        # no es coneix -- ni banner ni confirmacio tenen sentit encara
+        # (el guardia de dalt ja bloqueja el pas).
+        if destino != "Lot" or tipus_lot is not None:
             # Piso 13J: si destino == "Lot", el flux real es el triat a
             # tipus_lot (traduit amb DESTI_LOT_DIRECTE), no el literal "Lot".
             destino_efectiu = DESTI_LOT_DIRECTE.get(tipus_lot) if destino == "Lot" else destino
-            if st.button(
-                "Desar arxius",
-                disabled=not archivos or (destino == "Lot" and tipus_lot is None),
-                type="primary",
-            ):
-                guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino_efectiu, es_lot=(destino == "Lot")))
+            context_afegir = (carpeta, destino_efectiu)
+            banner = (
+                f"📥 Pujant a: **{fila_afegir['nombre']} ({carpeta})** → "
+                f"**{destino_efectiu.upper()}**"
+            )
+            if destino_efectiu == "Vendes":
+                st.success(banner)
+            else:
+                st.info(banner)
+
+            # Piso 13Q: PREVENIR -- confirmacio NOMES quan el context canvia
+            # (primera pujada de la sessio, o client/flux diferent de
+            # l'anterior). Un cop confirmat, pujar mes arxius al MATEIX
+            # context no torna a preguntar -- mai una confirmacio rutinaria.
+            if st.session_state.get("afegir_context_confirmat") != context_afegir:
+                st.warning(
+                    "Has canviat de client o de destí -- confirma abans de pujar arxius."
+                )
+                if st.button("Confirmar destinació", type="primary", key="afegir_confirmar_context"):
+                    st.session_state["afegir_context_confirmat"] = context_afegir
+                    st.rerun()
+            else:
+                tipos_permitidos = ["pdf"] if destino == "Lot" else EXTENSIONES_PERMITIDAS
+                archivos = st.file_uploader(
+                    "Arrossega els arxius aquí",
+                    type=tipos_permitidos,
+                    accept_multiple_files=True,
+                )
+
+                # Piso 13D: guardia de lots despistats -- nomes te sentit si
+                # l'usuari NO ha triat ja "Lot d'escaner" expressament. Mira
+                # cada PDF en memoria (mai es desa res a disc encara).
+                sospitos = None
+                if destino in ("Compres", "Vendes"):
+                    for a in archivos or []:
+                        if os.path.splitext(a.name)[1].lower() == ".pdf":
+                            try:
+                                n_pag = len(PdfReader(io.BytesIO(a.getvalue())).pages)
+                            except Exception:
+                                continue  # PDF no llegible -- no es el moment de bloquejar
+                            if n_pag > 3:
+                                sospitos = (a.name, n_pag)
+                                break
+
+                if sospitos:
+                    nombre_sospitos, n_pag = sospitos
+                    st.warning(f"Aquest PDF ({nombre_sospitos}) té {n_pag} pàgines — és un lot d'escàner?")
+                    col_si, col_no = st.columns(2)
+                    with col_si:
+                        confirmar_lot = st.button("Sí, és un lot", key="lot_confirmar")
+                    with col_no:
+                        confirmar_solta = st.button("No, és una factura llarga", key="lot_descartar")
+                    if confirmar_lot:
+                        # Piso 13K: abans "Lot" literal, ignorant el flux triat --
+                        # ara respecta destino (Compres/Vendes) i nomes marca
+                        # es_lot=True per triar el moll corresponent.
+                        guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino, es_lot=True))
+                    elif confirmar_solta:
+                        guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino))
+                else:
+                    if st.button("Desar arxius", disabled=not archivos, type="primary"):
+                        guardar_y_reportar(
+                            archivos, ruta_destino_factures(carpeta, destino_efectiu, es_lot=(destino == "Lot")),
+                        )
 
 # ----------------------------------------------------------------------
 elif vista == "Processar":
@@ -2013,6 +2113,62 @@ elif vista == "Revisió":
                                 estado["carpeta_cliente"], ruta, motivo_error(ruta), qui, nota=nota_lot_errores,
                             )
                         st.rerun()
+
+        # Piso 13Q: NETEJA DE DUPLICATS -- validar.py (Piso 13J) ja calcula
+        # el motiu "factura duplicada: mismo proveedor+num_factura que ..."
+        # per cada pendent; aquesta secció NOMÉS agrupa el que ja existeix
+        # (cap detecció nova) i ofereix descartar les còpies amb un clic en
+        # comptes d'una a una des de la targeta.
+        grups_duplicats = {}
+        for nombre_dup, datos_dup, flujo_dup, origen_dup in estado["pendents"]:
+            if not any((m or "").startswith("factura duplicada") for m in (datos_dup.get("motivos") or [])):
+                continue
+            clau = (datos_dup.get("nif_proveedor"), datos_dup.get("num_factura"))
+            grups_duplicats.setdefault(clau, []).append((nombre_dup, datos_dup, flujo_dup, origen_dup))
+
+        st.markdown(f"### Duplicats ({len(grups_duplicats)} grups)")
+        if not grups_duplicats:
+            st.caption("Cap duplicat detectat.")
+        else:
+            for (nif_dup, num_dup), membres in grups_duplicats.items():
+                membres_amb_data = []
+                for nombre_dup, datos_dup, flujo_dup, origen_dup in membres:
+                    ruta_orig_dup = encontrar_original(origen_dup, nombre_dup)
+                    mtime_dup = os.path.getmtime(ruta_orig_dup) if ruta_orig_dup else 0
+                    membres_amb_data.append((nombre_dup, flujo_dup, mtime_dup))
+                membres_amb_data.sort(key=lambda t: t[2])
+
+                with st.container(border=True, key=f"dup_grup_{carpeta}_{nif_dup}_{num_dup}"):
+                    st.markdown(f"**Factura {num_dup}** · NIF {nif_dup} · {len(membres_amb_data)} còpies")
+                    seleccio = {}
+                    for i, (nombre_dup, flujo_dup, mtime_dup) in enumerate(membres_amb_data):
+                        data_llegible = (
+                            datetime.fromtimestamp(mtime_dup).strftime("%d/%m/%Y %H:%M") if mtime_dup else "—"
+                        )
+                        etiqueta_rol = "original (més antiga)" if i == 0 else "còpia"
+                        seleccio[nombre_dup] = st.checkbox(
+                            f"{nombre_dup} — {data_llegible} — {flujo_dup} — {etiqueta_rol}",
+                            value=(i != 0),
+                            key=f"dup_sel_{carpeta}_{nombre_dup}",
+                        )
+                    marcades = [n for n, sel in seleccio.items() if sel]
+                    if st.button(
+                        f"DESCARTAR LES CÒPIES SELECCIONADES ({len(marcades)})",
+                        key=f"dup_descartar_{carpeta}_{nif_dup}_{num_dup}",
+                    ):
+                        no_marcades = [n for n in seleccio if n not in marcades]
+                        if not marcades:
+                            st.error("Selecciona almenys una còpia abans de descartar.")
+                        elif not no_marcades:
+                            st.error("Cal deixar almenys un document viu -- no es pot descartar tot el grup.")
+                        else:
+                            original_citat = no_marcades[0]
+                            for n in marcades:
+                                escribir_decision(
+                                    estado["carpeta_cliente"], n, "descartar",
+                                    f"duplicat de {original_citat}", qui,
+                                )
+                            st.rerun()
 
         with st.expander(f"Ja decidits ({n_decidits})", key=f"revisio_expander_decidits_{carpeta}"):
             if not estado["decisiones"]:

@@ -63,6 +63,46 @@ def leer_clientes():
         return list(csv.DictReader(f))
 
 
+CAMPOS_NUMERICOS_LINEA = {"tipo_iva", "base", "cuota"}
+CAMPOS_NUMERICOS_TOP = {"total", "retencion_pct", "retencion_cuota"}
+
+
+def a_numero(valor):
+    """Piso 13Q: misma logica que a_numero() de validar.py (duplicada
+    a proposito -- ninguna "maquina" importa otra, igual que
+    leer_clientes()) -- nunca lanza. Defensa en el punto de carga: la
+    API siempre ha devuelto tipos nativos hasta ahora, pero si algun
+    dia devolviera un numero como texto ("1.234,56"), se guarda ya
+    convertido en vez de dejar pasar un string a extraidas/*.json."""
+    if valor is None:
+        return None
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    texto = str(valor).strip().replace("€", "").replace(" ", "")
+    if texto == "":
+        return None
+    if "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    try:
+        return float(texto)
+    except ValueError:
+        return None
+
+
+def normalizar_numeros(datos):
+    """Piso 13Q: aplica a_numero() SOLO a los campos que ya son string
+    -- un int/float ya valido se deja intacto. Nunca lanza, nunca hace
+    fallar la extraccion de una factura por esto."""
+    for campo in CAMPOS_NUMERICOS_TOP:
+        if isinstance(datos.get(campo), str):
+            datos[campo] = a_numero(datos[campo])
+    for linea in datos.get("lineas_iva") or []:
+        for campo in CAMPOS_NUMERICOS_LINEA:
+            if isinstance(linea.get(campo), str):
+                linea[campo] = a_numero(linea[campo])
+    return datos
+
+
 SUBCARPETAS_RESERVADAS = {"extraidas", "validadas", "procesadas", "lotes_escaneados", "lotes_procesados"}
 
 
@@ -225,6 +265,7 @@ for fila in leer_clientes():
 
                 texto = respuesta.content[0].text
                 datos = json.loads(limpiar_json(texto))
+                datos = normalizar_numeros(datos)
 
                 with open(ruta_json, "w", encoding="utf-8") as f:
                     json.dump(datos, f, indent=2, ensure_ascii=False)

@@ -43,6 +43,20 @@ formato UE. El xec de duplicados (nif_proveedor, num_factura) ya no
 cuenta una factura con num_factura ausente -- antes bastaba que
 coincidiera el proveedor para marcar "duplicada" encima del motivo
 real de campo vacio.
+
+Piso 13Q: bug real -- convertir_valor() llamaba float() a secas sobre
+el texto de una correccion manual, sin try/except; si alguien tecleaba
+un numero en formato español ("1.234,56") o basura ("N/A") en el
+dialogo "Corregir camps" de la app, el siguiente Recalcular tumbaba
+TODO el batch de validar.py (ValueError sin capturar, un solo script,
+sin aislamiento por cliente). a_numero() nunca lanza: entiende formato
+español, y si no puede convertir un valor no vacio, la ficha cae a
+REVISAR con el motivo "importe numérico ilegible en...", nunca crashea
+el lote. Ademas del camino de correcciones (unico donde se ha
+reproducido el bug), normalizar_numeros() aplica el mismo blindaje de
+forma defensiva a los campos ya cargados de extraidas/ -- pero SOLO si
+ya son string (nunca toca un int/float existente, cero riesgo de
+regresion en los datos reales, que siempre traen tipos nativos).
 """
 
 import csv
@@ -109,14 +123,76 @@ CAMPOS_NUMERICOS_LINEA = {"tipo_iva", "base", "cuota"}
 CAMPOS_NUMERICOS_TOP = {"total", "retencion_pct", "retencion_cuota"}
 
 
+def a_numero(valor):
+    """Piso 13Q: convierte texto en formato español ("1.234,56", "1234,56",
+    con espacios o "€") a float -- NUNCA lanza excepcion. Si ya es un
+    numero (int/float), lo devuelve tal cual. Si no se puede convertir
+    (texto vacio o basura tipo "abc"/"N/A"), devuelve None -- quien
+    llama decide si eso es motivo de REVISAR."""
+    if valor is None:
+        return None
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    texto = str(valor).strip().replace("€", "").replace(" ", "")
+    if texto == "":
+        return None
+    if "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    try:
+        return float(texto)
+    except ValueError:
+        return None
+
+
 def convertir_valor(campo, valor_texto):
     """Piso 11B: correccions.csv llega siempre como texto -- conversion
-    minima al tipo que espera el esquema canonico."""
+    minima al tipo que espera el esquema canonico. Piso 13Q: a_numero()
+    en vez de float() a secas -- nunca crashea el lote entero por una
+    correccion mal tecleada."""
     if campo in CAMPOS_NUMERICOS_LINEA or campo in CAMPOS_NUMERICOS_TOP:
-        return float(valor_texto)
+        return a_numero(valor_texto)
     if campo == "exenta":
         return valor_texto.strip().lower() in ("true", "1", "si", "sí")
     return valor_texto
+
+
+def normalizar_numeros(datos):
+    """Piso 13Q: aplica a_numero() a cada campo numerico, pero SOLO si
+    ya es un string -- un int/float existente (todo lo real, hoy) se
+    deja intacto, cero riesgo de regresion. Defensa en el punto de
+    carga por si extraer_todas.py dejara pasar algun dia un string
+    (la API siempre ha devuelto tipos nativos hasta ahora). Devuelve
+    (datos, illegibles) -- illegibles es una lista de (campo,
+    valor_crudo) para los que no se ha podido convertir."""
+    datos = dict(datos)
+    illegibles = []
+
+    for campo in CAMPOS_NUMERICOS_TOP:
+        crudo = datos.get(campo)
+        if isinstance(crudo, str):
+            convertido = a_numero(crudo)
+            if convertido is None and crudo.strip():
+                illegibles.append((campo, crudo))
+            datos[campo] = convertido
+
+    if datos.get("lineas_iva"):
+        lineas_norm = []
+        for i, linea in enumerate(datos["lineas_iva"], start=1):
+            linea = dict(linea)
+            for campo in CAMPOS_NUMERICOS_LINEA:
+                crudo = linea.get(campo)
+                if isinstance(crudo, str):
+                    convertido = a_numero(crudo)
+                    if convertido is None and crudo.strip():
+                        illegibles.append((f"lineas_iva[{i}].{campo}", crudo))
+                    linea[campo] = convertido
+            lineas_norm.append(linea)
+        datos["lineas_iva"] = lineas_norm
+
+    return datos, illegibles
+
+
+CAMPOS_NUMERICOS = CAMPOS_NUMERICOS_LINEA | CAMPOS_NUMERICOS_TOP
 
 
 def aplicar_correcciones(datos, correcciones_archivo):
@@ -126,15 +202,23 @@ def aplicar_correcciones(datos, correcciones_archivo):
     "lineas_iva[N].subcampo" para corregir una linea de IVA concreta.
     La ficha corregida sigue despues por la red de validacion sin
     tocar, tal cual -- esta funcion NO valida nada, solo sustituye
-    valores."""
+    valores.
+
+    Piso 13Q: tambien devuelve correcciones_illegibles -- (camp,
+    valor_cru) para cada correccion de un campo numerico cuyo texto
+    (no vacio) a_numero() no ha podido convertir. Antes esto lanzaba
+    ValueError sin capturar (float() a secas) y tumbaba el batch
+    entero; ahora simplemente se anota para que el bucle principal lo
+    convierta en un motivo REVISAR."""
     if not correcciones_archivo:
-        return datos, []
+        return datos, [], []
 
     datos = dict(datos)
     if datos.get("lineas_iva") is not None:
         datos["lineas_iva"] = [dict(linea) for linea in datos["lineas_iva"]]
 
     camps_corregits = []
+    correcciones_illegibles = []
     for correccion in correcciones_archivo:
         camp = correccion["camp"]
         coincide_linea = re.match(r"lineas_iva\[(\d+)\]\.(\w+)", camp)
@@ -142,10 +226,14 @@ def aplicar_correcciones(datos, correcciones_archivo):
             indice, subcampo = int(coincide_linea.group(1)), coincide_linea.group(2)
             antic = datos["lineas_iva"][indice].get(subcampo)
             nuevo = convertir_valor(subcampo, correccion["valor_nou"])
+            if nuevo is None and subcampo in CAMPOS_NUMERICOS and correccion["valor_nou"].strip():
+                correcciones_illegibles.append((camp, correccion["valor_nou"]))
             datos["lineas_iva"][indice][subcampo] = nuevo
         else:
             antic = datos.get(camp)
             nuevo = convertir_valor(camp, correccion["valor_nou"])
+            if nuevo is None and camp in CAMPOS_NUMERICOS and correccion["valor_nou"].strip():
+                correcciones_illegibles.append((camp, correccion["valor_nou"]))
             datos[camp] = nuevo
         camps_corregits.append({
             "camp": camp,
@@ -154,7 +242,7 @@ def aplicar_correcciones(datos, correcciones_archivo):
             "qui": correccion.get("qui"),
             "data": correccion.get("data"),
         })
-    return datos, camps_corregits
+    return datos, camps_corregits, correcciones_illegibles
 
 
 # (etiqueta, carpeta origen, carpeta destino) -- mismo esquema y mismas reglas
@@ -168,7 +256,13 @@ ok_total = {"rebudes": 0, "ingressos": 0}
 revisar_total = {"rebudes": 0, "ingressos": 0}
 ilegibles_total = {"rebudes": 0, "ingressos": 0}
 
-for fila in leer_clientes():
+# Piso 13Q: capturado una vez (no dentro del bucle) para poder comprobar,
+# cuando una factura no coincide con NINGUN NIF del cliente actual, si su
+# contrapart coincide con el NIF de OTRO cliente del registro (sugerencia
+# de "sembla que sigui de X", nunca un movimiento automatico).
+todos_clientes = leer_clientes()
+
+for fila in todos_clientes:
     carpeta = fila["carpeta"]
     nif_receptor_esperado = fila["nif"]
 
@@ -200,10 +294,13 @@ for fila in leer_clientes():
             try:
                 with open(ruta, encoding="utf-8") as f:
                     datos = json.load(f)
-                datos, camps_corregits = aplicar_correcciones(datos, correcciones.get(nombre, []))
+                datos, camps_corregits, correcciones_illegibles = aplicar_correcciones(
+                    datos, correcciones.get(nombre, [])
+                )
                 if camps_corregits:
                     correcciones_aplicadas[nombre] = camps_corregits
-                facturas.append((nombre, datos))
+                datos, illegibles_raw = normalizar_numeros(datos)
+                facturas.append((nombre, datos, correcciones_illegibles + illegibles_raw))
             except (json.JSONDecodeError, OSError) as e:
                 print(f"AVISO: {nombre} ilegible: {e}")
                 ilegibles += 1
@@ -216,7 +313,7 @@ for fila in leer_clientes():
         # antes disparaban un "duplicada" falso y redundante encima del
         # motivo real.
         claves = {}
-        for nombre, datos in facturas:
+        for nombre, datos, _ in facturas:
             if datos.get("num_factura") is None:
                 continue
             clave = (datos.get("nif_proveedor"), datos.get("num_factura"))
@@ -225,11 +322,19 @@ for fila in leer_clientes():
         # Segunda pasada -- validar cada factura
         ok = 0
         revisar = 0
-        for nombre, datos in facturas:
+        for nombre, datos, illegibles_numeros in facturas:
             motivos = []
 
+            campos_illegibles = {campo for campo, _ in illegibles_numeros}
+            for campo, valor_cru in illegibles_numeros:
+                motivos.append(f"importe numérico ilegible en {campo}: '{valor_cru}'")
+
             for campo in CAMPOS_OBLIGATORIOS:
-                if datos.get(campo) is None:
+                # Piso 13Q: si ya sabemos que estaba ilegible (no vacio, sino
+                # basura que a_numero() no ha podido convertir), no hace
+                # falta el motivo generico de "vacío" encima -- seria
+                # confuso, el campo no estaba vacío.
+                if datos.get(campo) is None and campo not in campos_illegibles:
                     motivos.append(f"campo obligatorio vacío: {campo}")
 
             lineas = datos.get("lineas_iva") or []
@@ -269,6 +374,35 @@ for fila in leer_clientes():
                 es_emisor = nif_proveedor_doc is not None and normalizar_nif(nif_proveedor_doc) == cliente_normalizado
                 if not es_receptor and not es_emisor:
                     motivos.append("el cliente no aparece ni como emisor ni como receptor")
+
+            # Piso 13Q: suggeriment de client -- NOMES quan cap NIF ha
+            # coincidit amb el client actual (el motiu d'identitat de dalt
+            # ja s'ha disparat), es comprova si el NIF que sobra coincideix
+            # amb un ALTRE client del registre. Mai mou res -- nomes marca
+            # la ficha perque la interfície pugui suggerir-ho.
+            suggerit_carpeta, suggerit_nom = None, None
+            identitat_no_coincideix = any(
+                m.startswith("nif_receptor no coincide")
+                or m == "el cliente no aparece ni como emisor ni como receptor"
+                for m in motivos
+            )
+            if identitat_no_coincideix:
+                if etiqueta == "rebudes":
+                    candidats_nif = [datos.get("nif_receptor")]
+                else:
+                    candidats_nif = [datos.get("nif_receptor"), datos.get("nif_proveedor")]
+                for nif_candidat in candidats_nif:
+                    nif_candidat_norm = normalizar_nif(nif_candidat)
+                    if nif_candidat_norm is None:
+                        continue
+                    for otro in todos_clientes:
+                        if otro["carpeta"] == carpeta:
+                            continue
+                        if normalizar_nif(otro["nif"]) == nif_candidat_norm:
+                            suggerit_carpeta, suggerit_nom = otro["carpeta"], otro["nombre"]
+                            break
+                    if suggerit_carpeta:
+                        break
 
             if datos.get("num_factura") is not None:
                 clave = (datos.get("nif_proveedor"), datos.get("num_factura"))
@@ -318,6 +452,8 @@ for fila in leer_clientes():
             salida["motivos"] = motivos
             salida["contrapart_nom"] = contrapart_nom
             salida["contrapart_nif"] = contrapart_nif
+            salida["suggerit_carpeta"] = suggerit_carpeta
+            salida["suggerit_nom"] = suggerit_nom
             if nombre in correcciones_aplicadas:
                 salida["camps_corregits"] = correcciones_aplicadas[nombre]
 
