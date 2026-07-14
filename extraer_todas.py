@@ -31,8 +31,11 @@ sin re-extraer nada.
 
 import base64
 import csv
+import hashlib
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 
 from anthropic import Anthropic
@@ -61,6 +64,58 @@ MEDIA_TYPE_POR_EXTENSION = {
 def leer_clientes():
     with open("clientes/clientes.csv", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def hash_sha256_archivo(ruta):
+    with open(ruta, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def cargar_indice_hashos(carpeta_cliente, rutas_a_indexar):
+    """Piso 13T: mateixa idea que app.py (duplicada a proposit, cap
+    "màquina" n'importa una altra) -- hashos.csv (hash,nombre) auto-
+    reparador, es manté sol entre les dues bandes (app.py el manté a la
+    pujada, aquest fitxer a l'extracció).
+
+    A diferència d'app.py (que sempre rep carpetes FULLA, ex.
+    "rebudes/entrada"), aquí "rebudes" és la carpeta PARE de entrada/ i
+    de qualsevol subcarpeta per proveïdor (listar_archivos_rebudes ja
+    fa aquest recorregut) -- per això rutas_a_indexar és una llista
+    d'ARXIUS concrets (ja resolta pel bucle principal), no de carpetes."""
+    ruta_csv = os.path.join(carpeta_cliente, "hashos.csv")
+    indice = {}
+    nombres_indexados = set()
+    if os.path.exists(ruta_csv):
+        with open(ruta_csv, encoding="utf-8") as f:
+            for fila in csv.DictReader(f):
+                indice[fila["hash"]] = fila["nombre"]
+                nombres_indexados.add(fila["nombre"])
+
+    filas_nuevas = []
+    for ruta_archivo in rutas_a_indexar:
+        nombre = os.path.basename(ruta_archivo)
+        if not os.path.isfile(ruta_archivo) or nombre in nombres_indexados:
+            continue
+        hash_archivo = hash_sha256_archivo(ruta_archivo)
+        # Piso 13T: setdefault, mai assignació directa -- rutas_a_indexar
+        # inclou TAMBÉ l'arxiu que el bucle principal està a punt de
+        # processar (encara no té json). Amb assignació directa, si
+        # aquest arxiu es el darrer en ordre alfabètic, es sobreescrivia
+        # a si mateix com a "existent" i el xec de sota mai saltava.
+        indice.setdefault(hash_archivo, nombre)
+        filas_nuevas.append((hash_archivo, nombre))
+        nombres_indexados.add(nombre)
+
+    if filas_nuevas:
+        os.makedirs(carpeta_cliente, exist_ok=True)
+        escribir_cabecera = not os.path.exists(ruta_csv)
+        with open(ruta_csv, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if escribir_cabecera:
+                writer.writerow(["hash", "nombre"])
+            writer.writerows(filas_nuevas)
+
+    return indice
 
 
 CAMPOS_NUMERICOS_LINEA = {"tipo_iva", "base", "cuota"}
@@ -176,6 +231,67 @@ Reglas:
 - num_factura: el número COMPLETO de la factura, incluyendo cualquier serie o prefijo que aparezca (ej. si la factura indica "Serie A - 14" o "2026/A-14", el campo debe ser ese texto completo, no solo "14").
 """
 
+
+def extraer_una_factura(ruta_archivo, ruta_json):
+    """Piso 13T: UNA sola crida a l'API per a aquest arxiu concret --
+    factoritzat del bucle principal (comportament idèntic, mateixos
+    missatges) perquè "Tornar a processar aquest arxiu" (app.py, targeta
+    d'ERROR) pugui reprocessar NOMÉS un document sense rellançar tot el
+    lot. Retorna True/False -- mai llença, el motiu ja s'imprimeix aquí."""
+    nombre_archivo = os.path.basename(ruta_archivo)
+    try:
+        extension = os.path.splitext(nombre_archivo)[1].lower()
+        tipo_bloque, media_type = MEDIA_TYPE_POR_EXTENSION[extension]
+
+        with open(ruta_archivo, "rb") as f:
+            archivo_base64 = base64.standard_b64encode(f.read()).decode("utf-8")
+
+        respuesta = cliente.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": tipo_bloque,
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": archivo_base64,
+                            },
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+        )
+
+        texto = respuesta.content[0].text
+        datos = json.loads(limpiar_json(texto))
+        datos = normalizar_numeros(datos)
+
+        with open(ruta_json, "w", encoding="utf-8") as f:
+            json.dump(datos, f, indent=2, ensure_ascii=False)
+
+        print(f"extraída: {nombre_archivo}")
+        return True
+
+    except Exception as e:
+        print(f"AVISO: error en {nombre_archivo}: {e}")
+        return False
+
+
+# Piso 13T: mode CLI d'un sol arxiu -- "Tornar a processar aquest arxiu"
+# (app.py) crida `python extraer_todas.py --archivo <ruta> --json <ruta>`
+# en comptes de rellançar tot el lot. Surt abans del bucle principal.
+if len(sys.argv) > 1 and sys.argv[1] == "--archivo":
+    ruta_archivo_cli = sys.argv[2]
+    ruta_json_cli = sys.argv[sys.argv.index("--json") + 1]
+    os.makedirs(os.path.dirname(ruta_json_cli), exist_ok=True)
+    ok_cli = extraer_una_factura(ruta_archivo_cli, ruta_json_cli)
+    sys.exit(0 if ok_cli else 1)
+
 # (etiqueta, carpeta origen, carpeta destino) -- mismo esquema y mismas reglas
 # para rebudes (facturas de compra) e ingressos (liquidaciones de cooperativa).
 # El origen de "rebudes" es la carpeta rebudes/ entera (no solo entrada/),
@@ -232,6 +348,22 @@ for fila in leer_clientes():
                 if f.lower().endswith(EXTENSIONES_ACEPTADAS)
             ]
 
+        # Piso 13T: index de hashos per detectar reentrades (mateix
+        # contingut, nom nou d'escaner) ABANS de pagar l'API. rutas_archivo
+        # ja cobreix entrada/ i qualsevol subcarpeta per proveïdor
+        # (listar_archivos_rebudes); "rebudes/procesadas" es l'unic
+        # sibling "ja processat" conegut a més (Piso 13Q/migrar_lot.py),
+        # exclòs de rutas_archivo per ser una carpeta reservada.
+        rutas_a_indexar = list(rutas_archivo)
+        if etiqueta == "rebudes":
+            carpeta_procesadas = f"clientes/{carpeta}/rebudes/procesadas"
+            if os.path.isdir(carpeta_procesadas):
+                rutas_a_indexar += [
+                    os.path.join(carpeta_procesadas, f) for f in sorted(os.listdir(carpeta_procesadas))
+                    if f.lower().endswith(EXTENSIONES_ACEPTADAS)
+                ]
+        indice_hash = cargar_indice_hashos(f"clientes/{carpeta}", rutas_a_indexar)
+
         print(f"\n== {carpeta} / {etiqueta} ==")
         extraidas = 0
         saltadas = 0
@@ -257,46 +389,23 @@ for fila in leer_clientes():
                 saltadas += 1
                 continue
 
-            try:
-                extension = os.path.splitext(nombre_archivo)[1].lower()
-                tipo_bloque, media_type = MEDIA_TYPE_POR_EXTENSION[extension]
+            # Piso 13T: mateix contingut que un arxiu JA extret (amb un
+            # altre nom) -- es copia la seva fitxa i mai es paga l'API
+            # per aquesta. validar.py ja marcarà "factura duplicada" si
+            # cal (mateix NIF+núm.), gratis, com sempre.
+            hash_archivo = hash_sha256_archivo(ruta_archivo)
+            nombre_existente = indice_hash.get(hash_archivo)
+            if nombre_existente and nombre_existente != nombre_archivo:
+                ruta_json_existente = os.path.join(carpeta_salida, os.path.splitext(nombre_existente)[0] + ".json")
+                if os.path.exists(ruta_json_existente):
+                    shutil.copy(ruta_json_existente, ruta_json)
+                    print(f"saltada (mateix contingut que {nombre_existente}): {nombre_archivo}")
+                    saltadas += 1
+                    continue
 
-                with open(ruta_archivo, "rb") as f:
-                    archivo_base64 = base64.standard_b64encode(f.read()).decode("utf-8")
-
-                respuesta = cliente.messages.create(
-                    model="claude-sonnet-4-6",
-                    max_tokens=1024,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": tipo_bloque,
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": media_type,
-                                        "data": archivo_base64,
-                                    },
-                                },
-                                {"type": "text", "text": prompt},
-                            ],
-                        }
-                    ],
-                )
-
-                texto = respuesta.content[0].text
-                datos = json.loads(limpiar_json(texto))
-                datos = normalizar_numeros(datos)
-
-                with open(ruta_json, "w", encoding="utf-8") as f:
-                    json.dump(datos, f, indent=2, ensure_ascii=False)
-
-                print(f"extraída: {nombre_archivo}")
+            if extraer_una_factura(ruta_archivo, ruta_json):
                 extraidas += 1
-
-            except Exception as e:
-                print(f"AVISO: error en {nombre_archivo}: {e}")
+            else:
                 con_error += 1
 
         print(f"{carpeta} / {etiqueta}: {extraidas} extraídas, {saltadas} saltadas, {con_error} con error")

@@ -91,6 +91,7 @@ amb un boto "Actualitzar comptadors", mai fingint un numero en viu.
 """
 
 import csv
+import hashlib
 import io
 import json
 import os
@@ -549,6 +550,70 @@ def ruta_destino_factures(carpeta, destino, es_lot=False):
     return ruta_proyecto("clientes", carpeta, "rebudes", "lotes_escaneados")
 
 
+def hash_sha256_bytes(contenido):
+    return hashlib.sha256(contenido).hexdigest()
+
+
+def hash_sha256_archivo(ruta):
+    with open(ruta, "rb") as f:
+        return hash_sha256_bytes(f.read())
+
+
+def cargar_indice_hashos(carpeta_cliente, carpetas_a_indexar):
+    """Piso 13T: hashos.csv (hash,nombre) -- auto-reparador: es carrega
+    el que ja hi ha i, per cada arxiu de les carpetes indicades que
+    encara no hi surti, es hasheja i s'hi afegeix (al csv i a l'índex
+    en memòria). "Es manté sol" -- no cal cap migració a part, els
+    arxius que ja existien abans d'aquest pis es van indexant sols la
+    primera vegada que es comproven."""
+    ruta_csv = os.path.join(carpeta_cliente, "hashos.csv")
+    indice = {}
+    nombres_indexados = set()
+    if os.path.exists(ruta_csv):
+        with open(ruta_csv, encoding="utf-8") as f:
+            for fila in csv.DictReader(f):
+                indice[fila["hash"]] = fila["nombre"]
+                nombres_indexados.add(fila["nombre"])
+
+    filas_nuevas = []
+    for carpeta in carpetas_a_indexar:
+        if not carpeta or not os.path.isdir(carpeta):
+            continue
+        for nombre in sorted(os.listdir(carpeta)):
+            ruta_archivo = os.path.join(carpeta, nombre)
+            if not os.path.isfile(ruta_archivo) or nombre in nombres_indexados:
+                continue
+            hash_archivo = hash_sha256_archivo(ruta_archivo)
+            indice[hash_archivo] = nombre
+            filas_nuevas.append((hash_archivo, nombre))
+            nombres_indexados.add(nombre)
+
+    if filas_nuevas:
+        os.makedirs(carpeta_cliente, exist_ok=True)
+        escribir_cabecera = not os.path.exists(ruta_csv)
+        with open(ruta_csv, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if escribir_cabecera:
+                writer.writerow(["hash", "nombre"])
+            writer.writerows(filas_nuevas)
+
+    return indice
+
+
+def registrar_hash(carpeta_cliente, hash_archivo, nombre):
+    """Afegeix una fila nova a hashos.csv -- crida just després de desar
+    un arxiu nou (cargar_indice_hashos ja l'hauria trobat sol la propera
+    vegada, però registrar-lo ara evita haver-lo de re-hashejar)."""
+    ruta_csv = os.path.join(carpeta_cliente, "hashos.csv")
+    os.makedirs(carpeta_cliente, exist_ok=True)
+    escribir_cabecera = not os.path.exists(ruta_csv)
+    with open(ruta_csv, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if escribir_cabecera:
+            writer.writerow(["hash", "nombre"])
+        writer.writerow([hash_archivo, nombre])
+
+
 def guardar_archivo(archivo_subido, carpeta_destino):
     """Guarda un archivo subido; .heic/.heif se convierten a .jpg con
     pillow-heif. Si el nombre ya existe, anade un sufijo numerico en
@@ -576,7 +641,7 @@ def guardar_archivo(archivo_subido, carpeta_destino):
     return nombre_final
 
 
-def guardar_y_reportar(archivos, carpeta_destino):
+def guardar_y_reportar(archivos, carpeta_destino, carpeta_cliente, carpetas_hash_extra=()):
     """Piso 13D: factoritzat perque "Afegir factures" el crida des de
     tres llocs (desar normal, i els dos camins de la guardia de lots
     despistats) sense repetir el mateix bloc tres cops.
@@ -591,20 +656,38 @@ def guardar_y_reportar(archivos, carpeta_destino):
     (identificador estable de Streamlit per a AQUESTA pujada concreta,
     Piso 13R) a session_state: cada archivo es desa EXACTAMENT una
     vegada per sessio, independentment de quants cops es re-renderitzi
-    o es re-clicki el mateix avis (regla 5: idempotent)."""
+    o es re-clicki el mateix avis (regla 5: idempotent).
+
+    Piso 13T: idempotencia per CONTINGUT (mai per nom) -- un escaner
+    reintrodueix el mateix paper amb un nom nou; el hash SHA-256 el
+    reconeix igual. carpetas_hash_extra permet incloure un sibling ja
+    conegut ("rebudes/procesadas") a la comprovacio, a mes de la propia
+    carpeta_destino."""
     ja_desats = st.session_state.setdefault("afegir_ja_desats", set())
+    indice_hash = cargar_indice_hashos(carpeta_cliente, [carpeta_destino, *carpetas_hash_extra])
     nombres_finales = []
+    ja_existents = []
     for a in archivos:
         if a.file_id in ja_desats:
             continue
-        nombres_finales.append(guardar_archivo(a, carpeta_destino))
+        hash_arxiu = hash_sha256_bytes(a.getvalue())
+        if hash_arxiu in indice_hash:
+            ja_existents.append((a.name, indice_hash[hash_arxiu]))
+            ja_desats.add(a.file_id)
+            continue
+        nombre_final = guardar_archivo(a, carpeta_destino)
+        indice_hash[hash_arxiu] = nombre_final
+        registrar_hash(carpeta_cliente, hash_arxiu, nombre_final)
+        nombres_finales.append(nombre_final)
         ja_desats.add(a.file_id)
 
     if nombres_finales:
         st.success(f"S'han desat {len(nombres_finales)} arxius a `{carpeta_destino}`:")
         for nombre in nombres_finales:
             st.write(f"- {nombre}")
-    else:
+    for nombre_pujat, nombre_existent in ja_existents:
+        st.warning(f"Aquest arxiu ja existeix com a `{nombre_existent}` -- no s'ha tornat a pujar ({nombre_pujat}).")
+    if not nombres_finales and not ja_existents:
         st.info("Aquests arxius ja s'havien desat abans en aquesta sessió -- no s'ha tornat a escriure res.")
 
 
@@ -1666,10 +1749,55 @@ def tarjeta_error(flujo, ruta, carpeta_cliente, qui, prefijo):
             st.warning(motivo_error(ruta))
             boton_obrir("Obrir arxiu", ruta, key=f"{prefijo}_error_original_{nombre}")
             st.caption("Torna a pujar l'arxiu bo des d'\"Afegir factures\".")
-            if st.button("Retirar arxiu il·legible", key=f"{prefijo}_retirar_{nombre}"):
-                destino = retirar_error(carpeta_cliente, ruta, motivo_error(ruta), qui)
-                st.success(f"Arxiu retirat a `{destino}`.")
-                st.rerun(scope="fragment")
+            col_retirar, col_reprocessar = st.columns(2)
+            with col_retirar:
+                if st.button("Retirar arxiu il·legible", key=f"{prefijo}_retirar_{nombre}"):
+                    destino = retirar_error(carpeta_cliente, ruta, motivo_error(ruta), qui)
+                    st.success(f"Arxiu retirat a `{destino}`.")
+                    st.rerun(scope="fragment")
+            with col_reprocessar:
+                # Piso 13T: reprocessar NOMÉS aquest arxiu -- una sola
+                # crida a extraer_todas.py (mode --archivo), mai tot el
+                # lot. Mateix candau que Processar/RECALCULAR (Piso
+                # 13S) -- toca els mateixos arxius.
+                if st.button("Tornar a processar aquest arxiu", key=f"{prefijo}_reprocessar_{nombre}"):
+                    candau_reprocessar = candau_processar_viu()
+                    if candau_reprocessar:
+                        st.error(
+                            f"Hi ha un Processar en marxa (iniciat per {candau_reprocessar.get('qui')} a les "
+                            f"{candau_reprocessar.get('data_inici')}) -- espera que acabi abans de reprocessar."
+                        )
+                    else:
+                        nombre_base = os.path.splitext(nombre)[0]
+                        if flujo == "rebudes":
+                            carpeta_extraidas = os.path.join(carpeta_cliente, "rebudes", "extraidas")
+                            carpeta_validadas = os.path.join(carpeta_cliente, "rebudes", "validadas")
+                        else:
+                            carpeta_extraidas = os.path.join(carpeta_cliente, "apartados", "ingressos_extraidas")
+                            carpeta_validadas = os.path.join(carpeta_cliente, "apartados", "ingressos_validadas")
+                        ruta_json_extraidas = os.path.join(carpeta_extraidas, nombre_base + ".json")
+                        ruta_json_validadas = os.path.join(carpeta_validadas, nombre_base + ".json")
+                        # Neteja l'estat parcial d'AQUEST arxiu concret,
+                        # mai de la resta -- mai un residu vell que faci
+                        # "saltada" sense voler en el reintent.
+                        for ruta_neteja in (ruta_json_extraidas, ruta_json_validadas):
+                            if os.path.exists(ruta_neteja):
+                                os.remove(ruta_neteja)
+
+                        with st.spinner("Reprocessant..."):
+                            proceso_extraccio = subprocess.run(
+                                [sys.executable, "extraer_todas.py", "--archivo", ruta, "--json", ruta_json_extraidas],
+                                cwd=RAIZ_PROYECTO, capture_output=True, text=True,
+                            )
+                            subprocess.run(
+                                [sys.executable, "validar.py"], cwd=RAIZ_PROYECTO, capture_output=True, text=True,
+                            )
+
+                        if proceso_extraccio.returncode == 0:
+                            st.toast(f"{nombre} reprocessat -- Recalcula per veure-ho a Revisió.", icon="✅")
+                        else:
+                            st.toast(f"{nombre} ha tornat a fallar en reprocessar-lo.", icon="⚠️")
+                        st.rerun(scope="fragment")
 
 
 # Piso 10.5: unic bloc CSS -- nomes per allo que config.toml no cobreix
@@ -1960,6 +2088,14 @@ elif vista == "Afegir factures":
                                 sospitos = (a.name, n_pag)
                                 break
 
+                # Piso 13T: hashos.csv viu a l'arrel del client; "rebudes/
+                # procesadas" es l'unic sibling "ja processat" conegut avui
+                # (Piso 13Q/migrar_lot.py), i nomes te sentit quan la
+                # destinacio es Compres solta (mai un lot sencer, que mai
+                # coincidira per hash amb una factura solta ja processada).
+                carpeta_arrel_client = ruta_proyecto("clientes", carpeta)
+                carpetes_procesadas = [os.path.join(carpeta_arrel_client, "rebudes", "procesadas")]
+
                 if sospitos:
                     nombre_sospitos, n_pag = sospitos
                     st.warning(f"Aquest PDF ({nombre_sospitos}) té {n_pag} pàgines — és un lot d'escàner?")
@@ -1972,13 +2108,20 @@ elif vista == "Afegir factures":
                         # Piso 13K: abans "Lot" literal, ignorant el flux triat --
                         # ara respecta destino (Compres/Vendes) i nomes marca
                         # es_lot=True per triar el moll corresponent.
-                        guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino, es_lot=True))
+                        guardar_y_reportar(
+                            archivos, ruta_destino_factures(carpeta, destino, es_lot=True), carpeta_arrel_client,
+                        )
                     elif confirmar_solta:
-                        guardar_y_reportar(archivos, ruta_destino_factures(carpeta, destino))
+                        guardar_y_reportar(
+                            archivos, ruta_destino_factures(carpeta, destino), carpeta_arrel_client,
+                            carpetas_hash_extra=carpetes_procesadas if destino == "Compres" else (),
+                        )
                 else:
                     if st.button("Desar arxius", disabled=not archivos, type="primary"):
                         guardar_y_reportar(
                             archivos, ruta_destino_factures(carpeta, destino_efectiu, es_lot=(destino == "Lot")),
+                            carpeta_arrel_client,
+                            carpetas_hash_extra=carpetes_procesadas if destino_efectiu == "Compres" and destino != "Lot" else (),
                         )
 
 # ----------------------------------------------------------------------
@@ -2352,18 +2495,42 @@ elif vista == "Revisió":
             clau = (datos_dup.get("nif_proveedor"), datos_dup.get("num_factura"))
             grups_duplicats.setdefault(clau, []).append((nombre_dup, datos_dup, flujo_dup, origen_dup))
 
+        # Piso 13T: l'ordre per data de cada grup es calcula UN SOL COP --
+        # el reutilitzen tant el botó gros com cada grup individual (abans
+        # es recalculava dins del bucle, ara nomes cal per mostrar-lo).
+        grups_ordenats = {}
+        for clau, membres in grups_duplicats.items():
+            membres_amb_data = []
+            for nombre_dup, datos_dup, flujo_dup, origen_dup in membres:
+                ruta_orig_dup = encontrar_original(origen_dup, nombre_dup)
+                mtime_dup = os.path.getmtime(ruta_orig_dup) if ruta_orig_dup else 0
+                membres_amb_data.append((nombre_dup, flujo_dup, mtime_dup))
+            membres_amb_data.sort(key=lambda t: t[2])
+            grups_ordenats[clau] = membres_amb_data
+
         st.markdown(f"### Duplicats ({len(grups_duplicats)} grups)")
         if not grups_duplicats:
             st.caption("Cap duplicat detectat.")
         else:
-            for (nif_dup, num_dup), membres in grups_duplicats.items():
-                membres_amb_data = []
-                for nombre_dup, datos_dup, flujo_dup, origen_dup in membres:
-                    ruta_orig_dup = encontrar_original(origen_dup, nombre_dup)
-                    mtime_dup = os.path.getmtime(ruta_orig_dup) if ruta_orig_dup else 0
-                    membres_amb_data.append((nombre_dup, flujo_dup, mtime_dup))
-                membres_amb_data.sort(key=lambda t: t[2])
+            total_copies = sum(len(m) - 1 for m in grups_ordenats.values())
+            # Piso 13T: el botó gros aplica la MATEIXA preselecció que ja fa
+            # cada grup per defecte (totes menys la més antiga) a TOTS els
+            # grups d'un sol clic -- els comptes al mateix botó ja son la
+            # confirmació d'una línia, no cal cap diàleg a part.
+            if st.button(
+                f"DESCARTAR TOTES LES CÒPIES ({len(grups_ordenats)} grups, {total_copies} còpies)",
+                key=f"dup_descartar_tot_{carpeta}", type="primary",
+            ):
+                for (nif_dup, num_dup), membres_amb_data in grups_ordenats.items():
+                    original_citat = membres_amb_data[0][0]
+                    for nombre_dup, _, _ in membres_amb_data[1:]:
+                        escribir_decision(
+                            estado["carpeta_cliente"], nombre_dup, "descartar",
+                            f"duplicat de {original_citat}", qui,
+                        )
+                st.rerun()
 
+            for (nif_dup, num_dup), membres_amb_data in grups_ordenats.items():
                 with st.container(border=True, key=f"dup_grup_{carpeta}_{nif_dup}_{num_dup}"):
                     st.markdown(f"**Factura {num_dup}** · NIF {nif_dup} · {len(membres_amb_data)} còpies")
                     seleccio = {}

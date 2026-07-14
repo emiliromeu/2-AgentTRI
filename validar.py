@@ -119,6 +119,30 @@ def cargar_correcciones(carpeta_cliente):
     return correcciones
 
 
+def cargar_decisiones(carpeta_cliente):
+    """Piso 13T: mismo criterio que app.py/sumar.py/informe.py (duplicado
+    a proposito, ninguna "maquina" importa otra) -- decisions.csv es
+    llibre major (Piso 13M): la ULTIMA fila de cada arxiu es el seu
+    estat efectiu, i un "revertir" l'elimina del diccionari. Aqui nomes
+    interessa saber quins arxius estan "descartar" -- per treure'ls del
+    xec de duplicats, mai per canviar estado/motivos (aixo segueix sent
+    nomes de la xarxa de validacio)."""
+    ruta = f"{carpeta_cliente}/decisions.csv"
+    decisiones = {}
+    if not os.path.exists(ruta):
+        return decisiones
+    with open(ruta, encoding="utf-8") as f:
+        for fila in csv.DictReader(f):
+            archivo = fila.get("archivo")
+            if not archivo:
+                continue
+            if fila.get("accion") == "revertir":
+                decisiones.pop(archivo, None)
+            else:
+                decisiones[archivo] = fila
+    return decisiones
+
+
 CAMPOS_NUMERICOS_LINEA = {"tipo_iva", "base", "cuota"}
 CAMPOS_NUMERICOS_TOP = {"total", "retencion_pct", "retencion_cuota"}
 
@@ -270,6 +294,9 @@ for fila in todos_clientes:
     # rebudes/ingressos igual que decisions.csv (Piso 9.2/11A).
     correcciones = cargar_correcciones(f"clientes/{carpeta}")
     correcciones_aplicadas = {}
+    # Piso 13T: nomes per treure les fitxes "descartar" del xec de
+    # duplicats -- una descartada mai compta com a "altre" per a ningu.
+    decisiones = cargar_decisiones(f"clientes/{carpeta}")
 
     for etiqueta, origen_rel, destino_rel in FLUJOS:
         carpeta_entrada = f"clientes/{carpeta}/{origen_rel}"
@@ -311,10 +338,15 @@ for fila in todos_clientes:
         # cae en REVISAR por "campo obligatorio vacío" (mas abajo), y si dos
         # facturas del mismo proveedor tienen las dos num_factura=None,
         # antes disparaban un "duplicada" falso y redundante encima del
-        # motivo real.
+        # motivo real. Piso 13T: una fitxa amb decisio efectiva "descartar"
+        # tampoc compta -- fora del joc es fora del joc, no contamina cap
+        # altra fitxa amb un "duplicada" contra un arxiu que ja no importa.
         claves = {}
         for nombre, datos, _ in facturas:
             if datos.get("num_factura") is None:
+                continue
+            decision_propia = decisiones.get(nombre)
+            if decision_propia and decision_propia.get("accion") == "descartar":
                 continue
             clave = (datos.get("nif_proveedor"), datos.get("num_factura"))
             claves.setdefault(clave, []).append(nombre)
@@ -419,7 +451,11 @@ for fila in todos_clientes:
 
             if datos.get("num_factura") is not None:
                 clave = (datos.get("nif_proveedor"), datos.get("num_factura"))
-                otros = [n for n in claves[clave] if n != nombre]
+                # Piso 13T: .get(clave, []) en comptes de claves[clave] --
+                # una fitxa que sigui ELLA MATEIXA descartada pot no
+                # apareixer al mapa (si era l'unica amb aquesta clau, o
+                # totes les que la comparteixen tambe estan descartades).
+                otros = [n for n in claves.get(clave, []) if n != nombre]
                 if otros:
                     motivos.append(f"factura duplicada: mismo proveedor+num_factura que {', '.join(otros)}")
 
