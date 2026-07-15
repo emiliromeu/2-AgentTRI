@@ -802,6 +802,188 @@ def guardar_y_reportar(archivos, carpeta_destino, carpeta_cliente, carpetas_hash
         st.info("Aquests arxius ja s'havien desat abans en aquesta sessió -- no s'ha tornat a escriure res.")
 
 
+def entrada_manual_factura(fila_afegir, carpeta):
+    """Piso 13X: tercer mode d'"Afegir factures" -- una fitxa tecleja a
+    ma (rebut sense escanejar, nota de despesa), sense passar mai per
+    extraer_todas.py. Es desa un JSON directament al MATEIX canal
+    "extraidas" que la LLM ja fa servir -- validar.py no es toca gens:
+    el seu bucle nomes llista *.json a extraidas/, aritmètica, checksum
+    de NIF, duplicats i identitat s'apliquen sols en el proper
+    Recalcular, exactament igual que a qualsevol altra fitxa.
+
+    Piso 13X: mateix fantasma "keys estables" que Corregir camps --
+    despres de desar, un senyal petit assigna un valor buit a cada key
+    "manual_*" ABANS que es tornin a instanciar al proper run, perque la
+    propera fitxa tecleja comenci en blanc (mai amb l'anterior parada).
+    Assignar un valor buit (mai `pop()`) -- confirmat en directe que
+    `pop()` no basta: el frontend del widget li reenvia el seu propi
+    valor cachejat abans que el script corri, i el "buit" es perd;
+    nomes una assignacio explicita (mateix patró que `entrada_cerca`)
+    guanya a aquesta rehidratacio."""
+    if st.session_state.pop("manual_reset_senyal", False):
+        n_linies_previes = st.session_state.get("manual_n_linies", 1)
+        for i in range(n_linies_previes):
+            st.session_state[f"manual_tipo_{i}"] = ""
+            st.session_state[f"manual_base_{i}"] = ""
+            st.session_state[f"manual_cuota_{i}"] = ""
+        st.session_state["manual_n_linies"] = 1
+        st.session_state["manual_qui"] = ""
+        st.session_state["manual_contrapart_nom"] = ""
+        st.session_state["manual_contrapart_nif"] = ""
+        st.session_state["manual_num_factura"] = ""
+        st.session_state["manual_exenta"] = False
+        st.session_state["manual_porta_retencio"] = False
+        st.session_state["manual_retencio_pct"] = ""
+        st.session_state["manual_retencio_cuota"] = ""
+        st.session_state["manual_total"] = ""
+
+    st.caption(
+        "Escriu les dades directament -- sense escanejar res. Passa per la "
+        "MATEIXA xarxa de validació que qualsevol altra fitxa (aritmètica, "
+        "NIF, duplicats, identitat) en el proper Recalcular."
+    )
+
+    qui_manual = st.text_input("Qui introdueix aquesta factura?", key="manual_qui")
+
+    flux_manual = st.radio("Flux", ["Compres", "Vendes"], horizontal=True, key="manual_flux")
+    if flux_manual == "Compres":
+        st.caption(f"Receptor: **{fila_afegir['nombre']}** (NIF {fila_afegir['nif']}) -- s'omple sol.")
+    else:
+        st.caption(f"Emissor: **{fila_afegir['nombre']}** (NIF {fila_afegir['nif']}) -- s'omple sol.")
+
+    col_nom, col_nif = st.columns(2)
+    with col_nom:
+        contrapart_nom_manual = st.text_input("Contrapart (nom)", key="manual_contrapart_nom")
+    with col_nif:
+        contrapart_nif_manual = st.text_input("Contrapart (NIF)", key="manual_contrapart_nif")
+
+    col_num, col_data = st.columns(2)
+    with col_num:
+        num_factura_manual = st.text_input("Número de factura", key="manual_num_factura")
+    with col_data:
+        data_factura_manual = st.date_input("Data de factura", key="manual_data_factura")
+
+    exempta_manual = st.checkbox("Exempta", key="manual_exenta")
+    if exempta_manual:
+        st.caption("⚠️ una factura exempta no porta IVA — revisa les línies")
+
+    # Piso 13X: llista dinàmica de línies d'IVA -- comptador propi a
+    # session_state (afegir/treure una línia), mateix mode de la resta
+    # del formulari (fora de st.form, per a les pistes en viu).
+    if "manual_n_linies" not in st.session_state:
+        st.session_state["manual_n_linies"] = 1
+
+    lineas_manuals = []
+    for i in range(st.session_state["manual_n_linies"]):
+        st.caption(f"Línia {i + 1}")
+        col_t, col_b, col_c = st.columns(3)
+        key_tipo, key_base, key_cuota = f"manual_tipo_{i}", f"manual_base_{i}", f"manual_cuota_{i}"
+        if exempta_manual:
+            # Assignat ABANS de crear el text_input d'aquesta key en
+            # aquesta mateixa execució -- mateixa cascada que Corregir camps.
+            st.session_state[key_tipo] = "0"
+            st.session_state[key_cuota] = "0"
+        with col_t:
+            t = st.text_input(f"Tipus IVA [{i + 1}]", key=key_tipo)
+        with col_b:
+            b = st.text_input(f"Base [{i + 1}]", key=key_base)
+        with col_c:
+            c = st.text_input(f"Quota [{i + 1}]", key=key_cuota)
+        base_num, tipo_num = a_numero(b), a_numero(t)
+        if base_num is not None and tipo_num is not None:
+            st.caption(f"{base_num} × {tipo_num}% = {base_num * tipo_num / 100:.2f} — coincideix amb el paper?")
+        lineas_manuals.append((t, b, c))
+
+    col_add, col_treure = st.columns(2)
+    with col_add:
+        if st.button("+ Afegir línia", key="manual_afegir_linia"):
+            st.session_state["manual_n_linies"] += 1
+            st.rerun()
+    with col_treure:
+        if st.button("- Treure línia", key="manual_treure_linia", disabled=st.session_state["manual_n_linies"] <= 1):
+            st.session_state["manual_n_linies"] -= 1
+            st.rerun()
+
+    porta_retencio = st.checkbox("Aquesta factura porta retenció?", key="manual_porta_retencio")
+    if porta_retencio:
+        col_pct, col_cuota_ret = st.columns(2)
+        with col_pct:
+            retencio_pct_manual = st.text_input("% Retenció", key="manual_retencio_pct")
+        with col_cuota_ret:
+            retencio_cuota_manual = st.text_input("Quota retenció", key="manual_retencio_cuota")
+    else:
+        retencio_pct_manual, retencio_cuota_manual = "0", "0.0"
+
+    suma_calculada = sum((a_numero(b) or 0) + (a_numero(c) or 0) for _, b, c in lineas_manuals)
+    st.caption(f"Suma de línies (bases+quotes): {suma_calculada:.2f} — coincideix amb el total del paper?")
+    total_manual = st.text_input("Total", key="manual_total")
+
+    if st.button("Desar fitxa", type="primary", key="manual_desar"):
+        errors_manual = []
+        if not qui_manual:
+            errors_manual.append("Cal escriure qui introdueix aquesta factura.")
+        if not contrapart_nom_manual:
+            errors_manual.append("Cal escriure el nom de la contrapart.")
+        if not contrapart_nif_manual:
+            errors_manual.append("Cal escriure el NIF de la contrapart.")
+        if not num_factura_manual:
+            errors_manual.append("Cal escriure el número de factura.")
+        if a_numero(total_manual) is None:
+            errors_manual.append("El total no és un import vàlid.")
+
+        if errors_manual:
+            for error in errors_manual:
+                st.error(error)
+        else:
+            carpeta_cliente_manual = ruta_proyecto("clientes", carpeta)
+            if flux_manual == "Compres":
+                proveedor_final, nif_proveedor_final = contrapart_nom_manual, contrapart_nif_manual
+                receptor_final, nif_receptor_final = fila_afegir["nombre"], fila_afegir["nif"]
+                carpeta_extraidas_manual = os.path.join(carpeta_cliente_manual, "rebudes", "extraidas")
+            else:
+                proveedor_final, nif_proveedor_final = fila_afegir["nombre"], fila_afegir["nif"]
+                receptor_final, nif_receptor_final = contrapart_nom_manual, contrapart_nif_manual
+                carpeta_extraidas_manual = os.path.join(carpeta_cliente_manual, "apartados", "ingressos_extraidas")
+
+            fitxa_manual = {
+                "proveedor": proveedor_final,
+                "nif_proveedor": nif_proveedor_final,
+                "num_factura": num_factura_manual,
+                "fecha_factura": data_factura_manual.isoformat(),
+                "receptor": receptor_final,
+                "nif_receptor": nif_receptor_final,
+                "lineas_iva": [
+                    {"tipo_iva": a_numero(t), "base": a_numero(b), "cuota": a_numero(c)}
+                    for t, b, c in lineas_manuals
+                ],
+                "total": a_numero(total_manual),
+                "retencion_pct": a_numero(retencio_pct_manual) or 0,
+                "retencion_cuota": a_numero(retencio_cuota_manual) or 0.0,
+                "exenta": exempta_manual,
+                "observaciones": None,
+                "origen": "manual",
+                "qui": qui_manual,
+                "data_entrada": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+            # Piso 13T: mateix patró de collisió que retirar_error -- mai
+            # sobreescriu, bump numèric si dues entrades manuals cauen
+            # dins el mateix segon.
+            os.makedirs(carpeta_extraidas_manual, exist_ok=True)
+            nombre_base_manual = f"manual_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            nombre_final_manual = f"{nombre_base_manual}.json"
+            contador_manual = 2
+            while os.path.exists(os.path.join(carpeta_extraidas_manual, nombre_final_manual)):
+                nombre_final_manual = f"{nombre_base_manual}_{contador_manual}.json"
+                contador_manual += 1
+            with open(os.path.join(carpeta_extraidas_manual, nombre_final_manual), "w", encoding="utf-8") as f:
+                json.dump(fitxa_manual, f, ensure_ascii=False, indent=2)
+
+            st.success(f"Fitxa manual desada: `{nombre_final_manual}`. Recalcula per fer-la passar la validació.")
+            st.session_state["manual_reset_senyal"] = True
+            st.rerun()
+
+
 @st.cache_data(show_spinner=False)
 def previsualizar_pdf(ruta_pdf, mtime):
     """Piso 12B: primera pagina del PDF renderitzada com a imatge en
@@ -931,6 +1113,26 @@ CAMPOS_CORREGIBLES_TOP = [
     "receptor", "nif_receptor", "total", "retencion_pct",
     "retencion_cuota", "exenta", "observaciones",
 ]
+
+
+def a_numero(valor):
+    """Piso 13X: mateix algorisme tolerant que validar.py (duplicat a
+    proposit, cap "maquina" n'importa una altra) -- converteix text en
+    format espanyol ("1.234,56", "1234,56") a float, MAI llança
+    excepcio. Buit o il·legible -> None."""
+    if valor is None:
+        return None
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    texto = str(valor).strip().replace("€", "").replace(" ", "")
+    if texto == "":
+        return None
+    if "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    try:
+        return float(texto)
+    except ValueError:
+        return None
 
 # Igual que en sumar.py/informe.py: traduccion de los motivos de
 # validar.py por sustitucion de palabras fijas (validar.py no se toca).
@@ -1200,6 +1402,30 @@ def escribir_correccion(carpeta_cliente, archivo, cambios, motiu, qui):
             writer.writerow(CAMPOS_CORRECCIONS_CSV)
         for camp, valor_antic, valor_nou in cambios:
             writer.writerow([archivo, camp, valor_antic, valor_nou, motiu, qui, data_actual])
+
+
+def historial_correccions(carpeta_cliente, nombre):
+    """Piso 13X: mateix esperit que historial_decisiones (13M) però per a
+    correccions.csv -- agrupa les files CONSECUTIVES d'aquest arxiu que
+    comparteixen (qui, data) en un "grup" (escribir_correccion escriu
+    totes les files d'un mateix clic amb la mateixa marca de temps).
+    Retorna una llista de grups en ordre cronològic, cada un
+    {"qui", "data", "canvis": [fila_csv, ...]} -- "Desfer últim canvi"
+    nomes necessita el darrer."""
+    ruta = os.path.join(carpeta_cliente, "correccions.csv")
+    if not os.path.exists(ruta):
+        return []
+    grups = []
+    with open(ruta, encoding="utf-8") as f:
+        for fila in csv.DictReader(f):
+            if fila.get("arxiu") != nombre:
+                continue
+            clau = (fila.get("qui"), fila.get("data"))
+            if grups and (grups[-1]["qui"], grups[-1]["data"]) == clau:
+                grups[-1]["canvis"].append(fila)
+            else:
+                grups.append({"qui": fila.get("qui"), "data": fila.get("data"), "canvis": [fila]})
+    return grups
 
 
 def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui, nota=None):
@@ -1619,6 +1845,20 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                 st.success(f"Corregit — {detall}")
             if tiene_correccion_pendiente(carpeta_cliente, nombre):
                 st.info("🕓 Corregit (pendent de recalcular)")
+            # Piso 13X: historial visible SEMPRE (no nomes despres de
+            # recalcular, com camps_corregits de dalt) -- llegeix
+            # correccions.csv en cru, mateix patró que tiene_correccion_pendiente.
+            grups_correccio_card = historial_correccions(carpeta_cliente, nombre)
+            if grups_correccio_card:
+                with st.expander(
+                    f"Historial de correccions ({len(grups_correccio_card)})",
+                    key=f"hist_correccio_{prefijo}_{nombre}",
+                ):
+                    for grup in grups_correccio_card:
+                        resum_grup = "; ".join(
+                            f"{c['camp']}: {c['valor_antic']} → {c['valor_nou']}" for c in grup["canvis"]
+                        )
+                        st.caption(f"{grup['data']} per {grup['qui']}: {resum_grup}")
             st.caption(nombre)
         with col_der:
             if ruta_original and extension in EXTENSIONES_IMAGEN:
@@ -1752,15 +1992,68 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
         # directe, captura feta). on_dismiss tanca el popover si es
         # cancel·la sense guardar; el camí de "Guardar" ho fa explicitament
         # just abans del seu propi st.rerun() de sempre.
+        # Piso 13X: totes les keys que aquest diàleg fa servir -- calen per
+        # "oblidar" qualsevol edició abandonada (vegeu _reiniciar_correccio).
+        n_linies_actual = len(datos.get("lineas_iva") or [])
+
+        def _keys_correccio():
+            keys = [f"{prefijo}_correccio_{camp}_{nombre}" for camp in CAMPOS_CORREGIBLES_TOP if camp != "exenta"]
+            keys.append(f"{prefijo}_correccio_exenta_{nombre}")
+            for i in range(n_linies_actual):
+                keys += [
+                    f"{prefijo}_correccio_tipo_{i}_{nombre}",
+                    f"{prefijo}_correccio_base_{i}_{nombre}",
+                    f"{prefijo}_correccio_cuota_{i}_{nombre}",
+                ]
+            keys.append(f"{prefijo}_correccio_motiu_{nombre}")
+            return keys
+
+        def _reiniciar_correccio():
+            """Piso 13X: FORENSE confirmat en directe -- les keys d'aquest
+            diàleg son estables entre obertures. Esborrar un camp i tancar
+            SENSE guardar mai escriu res a correccions.csv (confirmat), però
+            el valor esborrat es queda parat a session_state; en reobrir el
+            MATEIX diàleg (sense recalcular pel mig), value= s'ignora
+            (Streamlit no reinicialitza una key ja existent) i es veu
+            l'edició abandonada com si fos la real -- un cop real de
+            correccions.csv (client penedes_languages, 2026-07-14 23:09)
+            en dona proba directa: una segona "Guardar" 9s després d'una
+            primera va re-escriure "0 -> 0" perquè el camp encara mostrava
+            el "0" de l'intent anterior, no el 21 real de la fitxa. Es
+            crida ABANS d'obrir el diàleg (botó "Corregir camps") i en
+            Cancel·lar -- mai després d'instanciar cap widget d'aquestes
+            keys en aquesta mateixa execució."""
+            for key in _keys_correccio():
+                st.session_state.pop(key, None)
+
         @st.dialog("Corregir camps", on_dismiss=_tancar_popover)
         def dialog_corregir_camps():
             st.caption(
                 "La fitxa corregida torna a passar tota la validació -- "
                 "corregir no aprova. Cal RECALCULAR després de desar."
             )
+            # Piso 13X: exenta és l'ÚNIC camp booleà de l'esquema -- casella,
+            # mai text "True"/"False". Viu FORA del form perquè la cascada
+            # de línies (tipus=0, quota=0) sigui EN VIU en marcar-la (un
+            # checkbox dins d'un st.form no reacciona fins que se sotmet).
+            key_exenta = f"{prefijo}_correccio_exenta_{nombre}"
+            exempta_marcada = st.checkbox(
+                "exenta", value=bool(datos.get("exenta")), key=key_exenta,
+            )
+            if exempta_marcada:
+                st.caption("⚠️ una factura exempta no porta IVA — revisa les línies")
+                for i in range(n_linies_actual):
+                    # Assignat ABANS de crear el text_input d'aquesta key en
+                    # aquesta mateixa execució -- mai després (regla establerta
+                    # al projecte).
+                    st.session_state[f"{prefijo}_correccio_tipo_{i}_{nombre}"] = "0"
+                    st.session_state[f"{prefijo}_correccio_cuota_{i}_{nombre}"] = "0"
+
             with st.form(key=f"form_correccio_{prefijo}_{nombre}", border=False):
                 valors_nous = {}
                 for camp in CAMPOS_CORREGIBLES_TOP:
+                    if camp == "exenta":
+                        continue
                     valor_actual = datos.get(camp)
                     valors_nous[camp] = st.text_input(
                         camp,
@@ -1788,11 +2081,28 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                         )
                     lineas_nuevas.append((i, t, b, c))
                 motiu_correccio = st.text_input("Motiu (obligatori)", key=f"{prefijo}_correccio_motiu_{nombre}")
-                click_guardar = st.form_submit_button("Guardar correccions")
+                col_guardar, col_cancelar = st.columns(2)
+                with col_guardar:
+                    click_guardar = st.form_submit_button("Guardar canvis", type="primary")
+                with col_cancelar:
+                    click_cancelar = st.form_submit_button("Cancel·lar")
+
+            if click_cancelar:
+                # Piso 13X: "restaura els valors originals" -- com les keys
+                # es netegen, en reobrir el diàleg value= torna a manar.
+                _reiniciar_correccio()
+                _tancar_popover()
+                st.rerun()
 
             if click_guardar:
                 cambios = []
+                valor_exenta_str = "True" if exempta_marcada else "False"
+                valor_exenta_antic_str = "True" if datos.get("exenta") else "False"
+                if valor_exenta_str != valor_exenta_antic_str:
+                    cambios.append(("exenta", valor_exenta_antic_str, valor_exenta_str))
                 for camp in CAMPOS_CORREGIBLES_TOP:
+                    if camp == "exenta":
+                        continue
                     valor_antic = datos.get(camp)
                     valor_antic_str = "" if valor_antic is None else str(valor_antic)
                     if valors_nous[camp] != valor_antic_str:
@@ -1812,10 +2122,11 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                     st.error("Cal escriure un motiu per desar correccions.")
                 else:
                     escribir_correccion(carpeta_cliente, nombre, cambios, motiu_correccio, qui)
-                    st.toast(
-                        "Correcció guardada — la fitxa tornarà a passar la xarxa en Recalcular.",
-                        icon="✅",
-                    )
+                    # Piso 13X: el toast resumeix el QUÈ -- mai un genèric
+                    # "guardat" que obliga a rellegir tota la fitxa per saber
+                    # què ha canviat de veritat.
+                    resum_canvis = ", ".join(f"{c}: {a}→{n}" for c, a, n in cambios)
+                    st.toast(f"{len(cambios)} camps: {resum_canvis}", icon="✅")
                     # Piso 13R: avís inline (mai bloquejant -- la doctrina no
                     # canvia, validar.py fa l'examen de veritat en el proper
                     # Recalcular) si la correcció deixa la fitxa amb
@@ -1823,8 +2134,6 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                     # de st.warning perquè el st.rerun() de sota esborraria
                     # qualsevol missatge normal abans que es pogués llegir
                     # (mateixa lliçó que Piso 13P).
-                    exenta_final = valors_nous["exenta"].strip().lower() in ("true", "1", "si", "sí")
-
                     def _es_positiu(texto):
                         try:
                             return float(texto) > 0
@@ -1832,7 +2141,7 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                             return False
 
                     te_iva = any(_es_positiu(t) or _es_positiu(c) for _, t, b, c in lineas_nuevas)
-                    if exenta_final and te_iva:
+                    if exempta_marcada and te_iva:
                         st.toast(
                             "Marcada com a exempta amb línies d'IVA -- tornarà a REVISAR fins "
                             "que corregeixis les línies (tipus 0, quota 0) o desmarquis exempta.",
@@ -1895,7 +2204,35 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
 
             st.markdown("**Corregir camps**")
             if st.button("Corregir camps", key=f"{prefijo}_obrir_correccio_{nombre}"):
+                # Piso 13X: mai obrir el diàleg amb una edició abandonada
+                # d'una obertura anterior parada a session_state (vegeu
+                # _reiniciar_correccio).
+                _reiniciar_correccio()
                 dialog_corregir_camps()
+
+            grups_correccio = historial_correccions(carpeta_cliente, nombre)
+            if grups_correccio:
+                st.markdown("**Desfer última correcció**")
+                ultim_grup = grups_correccio[-1]
+                resum_ultim = "; ".join(
+                    f"{c['camp']}: {c['valor_antic']} → {c['valor_nou']}" for c in ultim_grup["canvis"]
+                )
+                st.caption(f"Última: {resum_ultim} ({ultim_grup['qui']}, {ultim_grup['data']})")
+                if st.button("Desfer últim canvi", key=f"{prefijo}_desfer_correccio_{nombre}"):
+                    # Piso 13X: simetria amb el 13M (decisions.csv) -- el
+                    # llibre només creix, mai s'edita ni s'esborra cap fila.
+                    # El grup INVERS és una fila nova, no una marxa enrere.
+                    cambios_inversos = [
+                        (c["camp"], c["valor_nou"], c["valor_antic"]) for c in ultim_grup["canvis"]
+                    ]
+                    motiu_original = ultim_grup["canvis"][0].get("motiu", "")
+                    escribir_correccion(
+                        carpeta_cliente, nombre, cambios_inversos,
+                        f"Desfet: {motiu_original}", qui,
+                    )
+                    st.toast("Últim canvi desfet — recalcula per refer els veredictes.", icon="↩️")
+                    _tancar_popover()
+                    st.rerun(scope="fragment")
 
 
 @st.fragment
@@ -2235,118 +2572,130 @@ elif vista == "Afegir factures":
         fila_afegir = opciones[eleccion]
         carpeta = fila_afegir["carpeta"]
 
-        # Piso 13D: tercer desti -- "Lot d'escaner". format_func desacobla
-        # el valor intern ("Lot") del text llarg mostrat, per no haver de
-        # comparar contra el string sencer a ruta_destino_factures.
-        destino = st.radio(
-            "Destí", list(DESTINOS_AFEGIR.keys()),
-            format_func=lambda k: DESTINOS_AFEGIR[k], horizontal=True,
-        )
-        st.caption(
-            "Factura solta: un únic document per arxiu. Lot d'escàner: un "
-            "sol PDF escanejat amb diverses factures/albarans a dins -- es "
-            "trocejarà automàticament en processar."
+        # Piso 13X: mode nou -- pujar un arxiu escanejat (de sempre) o
+        # teclejar una fitxa a ma (mai passa per extraer_todas.py). Son
+        # dos eixos diferents (mètode d'entrada, no destí), per això un
+        # selector propi a dalt en comptes d'un quart valor barrejat al
+        # radio "Destí" de sota.
+        mode_afegir = st.radio(
+            "Com vols afegir factures?", ["Pujar arxius", "Entrada manual"], horizontal=True,
         )
 
-        # Piso 13J: "Lot d'escaner" triat DIRECTAMENT (sense passar per la
-        # guardia de mes avall) abans assumia sempre Compres en silenci --
-        # bug real de camp (~70 factures emeses processades com a compres).
-        # Bloquejant (regla 10): sense triar-ho, no es pot ni pujar el PDF.
-        tipus_lot = None
-        if destino == "Lot":
-            tipus_lot = st.radio(
-                "Aquest lot és de...", list(DESTI_LOT_DIRECTE.keys()),
-                index=None, horizontal=True, key="tipus_lot_directe",
+        if mode_afegir == "Pujar arxius":
+            # Piso 13D: tercer desti -- "Lot d'escaner". format_func desacobla
+            # el valor intern ("Lot") del text llarg mostrat, per no haver de
+            # comparar contra el string sencer a ruta_destino_factures.
+            destino = st.radio(
+                "Destí", list(DESTINOS_AFEGIR.keys()),
+                format_func=lambda k: DESTINOS_AFEGIR[k], horizontal=True,
             )
-            if tipus_lot is None:
-                st.info("Selecciona si el lot és de compres o de vendes abans de pujar el PDF.")
-
-        # Piso 13Q: mentre "Lot" encara no te tipus triat, el desti real
-        # no es coneix -- ni banner ni confirmacio tenen sentit encara
-        # (el guardia de dalt ja bloqueja el pas).
-        if destino != "Lot" or tipus_lot is not None:
-            # Piso 13J: si destino == "Lot", el flux real es el triat a
-            # tipus_lot (traduit amb DESTI_LOT_DIRECTE), no el literal "Lot".
-            destino_efectiu = DESTI_LOT_DIRECTE.get(tipus_lot) if destino == "Lot" else destino
-            context_afegir = (carpeta, destino_efectiu)
-            banner = (
-                f"📥 Pujant a: **{fila_afegir['nombre']} ({carpeta})** → "
-                f"**{destino_efectiu.upper()}**"
+            st.caption(
+                "Factura solta: un únic document per arxiu. Lot d'escàner: un "
+                "sol PDF escanejat amb diverses factures/albarans a dins -- es "
+                "trocejarà automàticament en processar."
             )
-            if destino_efectiu == "Vendes":
-                st.success(banner)
-            else:
-                st.info(banner)
 
-            # Piso 13Q: PREVENIR -- confirmacio NOMES quan el context canvia
-            # (primera pujada de la sessio, o client/flux diferent de
-            # l'anterior). Un cop confirmat, pujar mes arxius al MATEIX
-            # context no torna a preguntar -- mai una confirmacio rutinaria.
-            if st.session_state.get("afegir_context_confirmat") != context_afegir:
-                st.warning(
-                    "Has canviat de client o de destí -- confirma abans de pujar arxius."
+            # Piso 13J: "Lot d'escaner" triat DIRECTAMENT (sense passar per la
+            # guardia de mes avall) abans assumia sempre Compres en silenci --
+            # bug real de camp (~70 factures emeses processades com a compres).
+            # Bloquejant (regla 10): sense triar-ho, no es pot ni pujar el PDF.
+            tipus_lot = None
+            if destino == "Lot":
+                tipus_lot = st.radio(
+                    "Aquest lot és de...", list(DESTI_LOT_DIRECTE.keys()),
+                    index=None, horizontal=True, key="tipus_lot_directe",
                 )
-                if st.button("Confirmar destinació", type="primary", key="afegir_confirmar_context"):
-                    st.session_state["afegir_context_confirmat"] = context_afegir
-                    st.rerun()
-            else:
-                tipos_permitidos = ["pdf"] if destino == "Lot" else EXTENSIONES_PERMITIDAS
-                archivos = st.file_uploader(
-                    "Arrossega els arxius aquí",
-                    type=tipos_permitidos,
-                    accept_multiple_files=True,
+                if tipus_lot is None:
+                    st.info("Selecciona si el lot és de compres o de vendes abans de pujar el PDF.")
+
+            # Piso 13Q: mentre "Lot" encara no te tipus triat, el desti real
+            # no es coneix -- ni banner ni confirmacio tenen sentit encara
+            # (el guardia de dalt ja bloqueja el pas).
+            if destino != "Lot" or tipus_lot is not None:
+                # Piso 13J: si destino == "Lot", el flux real es el triat a
+                # tipus_lot (traduit amb DESTI_LOT_DIRECTE), no el literal "Lot".
+                destino_efectiu = DESTI_LOT_DIRECTE.get(tipus_lot) if destino == "Lot" else destino
+                context_afegir = (carpeta, destino_efectiu)
+                banner = (
+                    f"📥 Pujant a: **{fila_afegir['nombre']} ({carpeta})** → "
+                    f"**{destino_efectiu.upper()}**"
                 )
-
-                # Piso 13D: guardia de lots despistats -- nomes te sentit si
-                # l'usuari NO ha triat ja "Lot d'escaner" expressament. Mira
-                # cada PDF en memoria (mai es desa res a disc encara).
-                sospitos = None
-                if destino in ("Compres", "Vendes"):
-                    for a in archivos or []:
-                        if os.path.splitext(a.name)[1].lower() == ".pdf":
-                            try:
-                                n_pag = len(PdfReader(io.BytesIO(a.getvalue())).pages)
-                            except Exception:
-                                continue  # PDF no llegible -- no es el moment de bloquejar
-                            if n_pag > 3:
-                                sospitos = (a.name, n_pag)
-                                break
-
-                # Piso 13T: hashos.csv viu a l'arrel del client; "rebudes/
-                # procesadas" es l'unic sibling "ja processat" conegut avui
-                # (Piso 13Q/migrar_lot.py), i nomes te sentit quan la
-                # destinacio es Compres solta (mai un lot sencer, que mai
-                # coincidira per hash amb una factura solta ja processada).
-                carpeta_arrel_client = ruta_proyecto("clientes", carpeta)
-                carpetes_procesadas = [os.path.join(carpeta_arrel_client, "rebudes", "procesadas")]
-
-                if sospitos:
-                    nombre_sospitos, n_pag = sospitos
-                    st.warning(f"Aquest PDF ({nombre_sospitos}) té {n_pag} pàgines — és un lot d'escàner?")
-                    col_si, col_no = st.columns(2)
-                    with col_si:
-                        confirmar_lot = st.button("Sí, és un lot", key="lot_confirmar")
-                    with col_no:
-                        confirmar_solta = st.button("No, és una factura llarga", key="lot_descartar")
-                    if confirmar_lot:
-                        # Piso 13K: abans "Lot" literal, ignorant el flux triat --
-                        # ara respecta destino (Compres/Vendes) i nomes marca
-                        # es_lot=True per triar el moll corresponent.
-                        guardar_y_reportar(
-                            archivos, ruta_destino_factures(carpeta, destino, es_lot=True), carpeta_arrel_client,
-                        )
-                    elif confirmar_solta:
-                        guardar_y_reportar(
-                            archivos, ruta_destino_factures(carpeta, destino), carpeta_arrel_client,
-                            carpetas_hash_extra=carpetes_procesadas if destino == "Compres" else (),
-                        )
+                if destino_efectiu == "Vendes":
+                    st.success(banner)
                 else:
-                    if st.button("Desar arxius", disabled=not archivos, type="primary"):
-                        guardar_y_reportar(
-                            archivos, ruta_destino_factures(carpeta, destino_efectiu, es_lot=(destino == "Lot")),
-                            carpeta_arrel_client,
-                            carpetas_hash_extra=carpetes_procesadas if destino_efectiu == "Compres" and destino != "Lot" else (),
-                        )
+                    st.info(banner)
+
+                # Piso 13Q: PREVENIR -- confirmacio NOMES quan el context canvia
+                # (primera pujada de la sessio, o client/flux diferent de
+                # l'anterior). Un cop confirmat, pujar mes arxius al MATEIX
+                # context no torna a preguntar -- mai una confirmacio rutinaria.
+                if st.session_state.get("afegir_context_confirmat") != context_afegir:
+                    st.warning(
+                        "Has canviat de client o de destí -- confirma abans de pujar arxius."
+                    )
+                    if st.button("Confirmar destinació", type="primary", key="afegir_confirmar_context"):
+                        st.session_state["afegir_context_confirmat"] = context_afegir
+                        st.rerun()
+                else:
+                    tipos_permitidos = ["pdf"] if destino == "Lot" else EXTENSIONES_PERMITIDAS
+                    archivos = st.file_uploader(
+                        "Arrossega els arxius aquí",
+                        type=tipos_permitidos,
+                        accept_multiple_files=True,
+                    )
+
+                    # Piso 13D: guardia de lots despistats -- nomes te sentit si
+                    # l'usuari NO ha triat ja "Lot d'escaner" expressament. Mira
+                    # cada PDF en memoria (mai es desa res a disc encara).
+                    sospitos = None
+                    if destino in ("Compres", "Vendes"):
+                        for a in archivos or []:
+                            if os.path.splitext(a.name)[1].lower() == ".pdf":
+                                try:
+                                    n_pag = len(PdfReader(io.BytesIO(a.getvalue())).pages)
+                                except Exception:
+                                    continue  # PDF no llegible -- no es el moment de bloquejar
+                                if n_pag > 3:
+                                    sospitos = (a.name, n_pag)
+                                    break
+
+                    # Piso 13T: hashos.csv viu a l'arrel del client; "rebudes/
+                    # procesadas" es l'unic sibling "ja processat" conegut avui
+                    # (Piso 13Q/migrar_lot.py), i nomes te sentit quan la
+                    # destinacio es Compres solta (mai un lot sencer, que mai
+                    # coincidira per hash amb una factura solta ja processada).
+                    carpeta_arrel_client = ruta_proyecto("clientes", carpeta)
+                    carpetes_procesadas = [os.path.join(carpeta_arrel_client, "rebudes", "procesadas")]
+
+                    if sospitos:
+                        nombre_sospitos, n_pag = sospitos
+                        st.warning(f"Aquest PDF ({nombre_sospitos}) té {n_pag} pàgines — és un lot d'escàner?")
+                        col_si, col_no = st.columns(2)
+                        with col_si:
+                            confirmar_lot = st.button("Sí, és un lot", key="lot_confirmar")
+                        with col_no:
+                            confirmar_solta = st.button("No, és una factura llarga", key="lot_descartar")
+                        if confirmar_lot:
+                            # Piso 13K: abans "Lot" literal, ignorant el flux triat --
+                            # ara respecta destino (Compres/Vendes) i nomes marca
+                            # es_lot=True per triar el moll corresponent.
+                            guardar_y_reportar(
+                                archivos, ruta_destino_factures(carpeta, destino, es_lot=True), carpeta_arrel_client,
+                            )
+                        elif confirmar_solta:
+                            guardar_y_reportar(
+                                archivos, ruta_destino_factures(carpeta, destino), carpeta_arrel_client,
+                                carpetas_hash_extra=carpetes_procesadas if destino == "Compres" else (),
+                            )
+                    else:
+                        if st.button("Desar arxius", disabled=not archivos, type="primary"):
+                            guardar_y_reportar(
+                                archivos, ruta_destino_factures(carpeta, destino_efectiu, es_lot=(destino == "Lot")),
+                                carpeta_arrel_client,
+                                carpetas_hash_extra=carpetes_procesadas if destino_efectiu == "Compres" and destino != "Lot" else (),
+                            )
+        else:
+            entrada_manual_factura(fila_afegir, carpeta)
 
 # ----------------------------------------------------------------------
 elif vista == "Processar":

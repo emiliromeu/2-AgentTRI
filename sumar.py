@@ -1068,6 +1068,11 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     if datos.get("exenta"):
         estado_mostrado += " | EXEMPTA"
 
+    # Piso 13X: mateix patró additiu -- fitxa nascuda a "Entrada manual"
+    # (app.py), mai passada per extraer_todas.py.
+    if datos.get("origen") == "manual":
+        estado_mostrado += " | ENTRADA MANUAL"
+
     celda_fecha(ws, fila, 1, datos.get("fecha_factura"))
     celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
     if ruta_original:

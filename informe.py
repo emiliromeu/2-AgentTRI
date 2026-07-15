@@ -531,6 +531,13 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         with open(ruta_original, "rb") as f:
             b64 = base64.standard_b64encode(f.read()).decode("utf-8")
         lado_derecho = f'<img loading="lazy" src="data:{EXTENSIONES_IMAGEN[extension]};base64,{b64}" alt="original">'
+    elif not ruta_original and datos.get("origen") == "manual":
+        # Piso 13X: mai cap original -- nascuda a "Entrada manual" (app.py),
+        # el genèric "Original no localitzat" semblaria un error real.
+        lado_derecho = (
+            f'<p class="sin-original">📝 ENTRADA MANUAL<br>'
+            f'{esc(datos.get("qui"))}, {esc(datos.get("data_entrada"))}</p>'
+        )
     else:
         lado_derecho = construir_enllac(ruta_original, carpeta_cliente, "Obrir original ↗", clase="btn-abrir") or (
             '<p class="sin-original">Original no localitzat</p>'
@@ -576,6 +583,12 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
     # visual, cap suma ni lògica canvia (el cub propi viu a sumar.py).
     exempta_html = '<span class="etiqueta-exempta">EXEMPTA</span>' if datos.get("exenta") else ""
 
+    # Piso 13X: mateix patró additiu -- fitxa nascuda a "Entrada manual".
+    manual_html = (
+        '<span class="etiqueta-decisio manual">📝 Entrada manual</span>'
+        if datos.get("origen") == "manual" else ""
+    )
+
     decisio_html = ""
     nota_decisio_html = ""
     if accion_decision == "aprovar":
@@ -614,6 +627,7 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         {abonament_html}
         {avisos_html}
         {exempta_html}
+        {manual_html}
         {decisio_html}
         {corregit_html}
         <h3>{esc(datos.get("contrapart_nom"))}</h3>
@@ -932,6 +946,7 @@ p.resultat-iva .nota { font-size: 0.8rem; font-style: italic; color: #555; }
 .etiqueta-exempta { background: #E4DFEC; color: #5C3D8C; }
 .etiqueta-decisio.aprovat { background: #E2EFDA; color: #375623; }
 .etiqueta-decisio.corregit { background: #D9E8F5; color: #0D3D6B; }
+.etiqueta-decisio.manual { background: #FFF2CC; color: #7F6000; }
 .lineas-iva { margin: 0.3rem 0; padding-left: 1.2rem; }
 .archivo { font-family: monospace; font-size: 0.8rem; color: #555; }
 .nota-decisio { font-style: italic; }
@@ -961,6 +976,7 @@ table.errors tbody tr { background: #FFC7CE; }
   .etiqueta-exempta { background: #3a2e4a; color: #c9a8f0; }
   .etiqueta-decisio.aprovat { background: #22331f; color: #b7d7a8; }
   .etiqueta-decisio.corregit { background: #1a2e42; color: #a9cdf0; }
+  .etiqueta-decisio.manual { background: #3a3319; color: #e0c97a; }
   table.errors tbody tr { background: #4a2323; }
   table.descartats tbody tr { background: #333; }
   .archivo { color: #aaa; }
@@ -997,8 +1013,13 @@ for fila_cliente in leer_clientes():
         if archivo not in nombres_validos:
             print(f"AVISO: decisions.csv de {carpeta} referencia un archivo que no existe entre las validadas: {archivo}")
 
-    # Panel CONCILIACIO -- solo lectura de disco
+    # Panel CONCILIACIO -- solo lectura de disco. Piso 13X: una entrada
+    # manual (app.py, "Entrada manual") mai te arxiu original -- sense
+    # sumar-la aqui, presentes queda per sota de ok+pendents i el quadre
+    # "presentes == ok+pendents+errors" trenca amb un ⚠ fals per a un
+    # document que si es genuinament present (nomes que no escanejat).
     presentes_gastos = len(listar_archivos_rebudes(origen_gastos))
+    presentes_gastos += sum(1 for _, d in gastos if d.get("origen") == "manual")
     extraidas_gastos = contar_json(f"{carpeta_cliente}/rebudes/extraidas")
     ok_gastos = sum(1 for _, d in gastos if d.get("estado") == "OK")
     pendents_gastos = len(gastos) - ok_gastos
@@ -1006,6 +1027,7 @@ for fila_cliente in leer_clientes():
     presentes_ingressos = len([
         f for f in os.listdir(origen_ingressos) if f.lower().endswith(EXTENSIONES_ORIGINAL)
     ]) if os.path.isdir(origen_ingressos) else 0
+    presentes_ingressos += sum(1 for _, d in ingresos if d.get("origen") == "manual")
     extraidas_ingressos = contar_json(f"{carpeta_cliente}/apartados/ingressos_extraidas")
     ok_ingressos = sum(1 for _, d in ingresos if d.get("estado") == "OK")
     pendents_ingressos = len(ingresos) - ok_ingressos
