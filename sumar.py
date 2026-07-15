@@ -186,6 +186,8 @@ TRADUCCIONES_MOTIVO = [
     ("el cliente no aparece ni como emisor ni como receptor",
      "el client no apareix ni com a emissor ni com a receptor"),
     ("las dos partes son el cliente", "les dues parts són el client"),
+    ("IVA incluido sin desglosar (tipo impreso:", "IVA inclòs sense desglosar (tipus imprès:"),
+    ("ninguno)", "cap)"),
 ]
 
 

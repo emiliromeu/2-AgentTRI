@@ -1154,6 +1154,8 @@ TRADUCCIONES_MOTIVO = [
      "marcada com a exempta però té línies amb IVA -- corregeix les línies (tipus 0, quota 0) o desmarca exempta"),
     ("retención no cuadra:", "la retenció no quadra:"),
     ("pero retencion_cuota indica", "però la retenció indica"),
+    ("IVA incluido sin desglosar (tipo impreso:", "IVA inclòs sense desglosar (tipus imprès:"),
+    ("ninguno)", "cap)"),
 ]
 
 
@@ -1839,6 +1841,49 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
             motivos = [traducir_motivo(m) for m in (datos.get("motivos") or [])]
             if motivos:
                 st.warning("\n".join(f"- {m}" for m in motivos))
+
+            # Piso 13Z: "IVA inclòs" sense desglosar -- la màquina mai
+            # inventa el desglose sola (extraer_todas.py ja ho deixa
+            # lineas_iva buida), però un cop la PERSONA confirma el tipus
+            # (imprès al paper, o triat aquí), la inversa matemàtica quadra
+            # sola per a QUALSEVOL tipus per construcció -- l'àncora és el
+            # paper, mai l'aritmètica. Un clic escriu la línia com a
+            # correcció firmada (mateix camí que "Corregir camps").
+            iva_inclos_sense_desglosar = (
+                bool(datos.get("iva_inclos_detectat")) and not (datos.get("lineas_iva") or [])
+            )
+            if iva_inclos_sense_desglosar and not tiene_correccion_pendiente(carpeta_cliente, nombre):
+                total_factura = datos.get("total") or 0
+                tipus_impres = datos.get("tipus_impres")
+                tipus_a_mostrar = [tipus_impres] if tipus_impres is not None else [21, 10, 4]
+                st.caption(
+                    "Desglose invers (base = total / (1 + tipus%), quota = total - base) -- "
+                    "tria el tipus que digui el paper:"
+                )
+                cols_desglose = st.columns(len(tipus_a_mostrar))
+                for col_desglose, tipo in zip(cols_desglose, tipus_a_mostrar):
+                    base_calc = round(total_factura / (1 + tipo / 100), 2)
+                    quota_calc = round(total_factura - base_calc, 2)
+                    with col_desglose:
+                        st.caption(f"{tipo}%: base {base_calc} €, quota {quota_calc} €")
+                        if st.button(
+                            "Aplicar desglose" if tipus_impres is not None else f"Aplicar {tipo}%",
+                            key=f"{prefijo}_desglose_{tipo}_{nombre}",
+                        ):
+                            cambios = [
+                                ("lineas_iva[0].tipo_iva", "", str(tipo)),
+                                ("lineas_iva[0].base", "", str(base_calc)),
+                                ("lineas_iva[0].cuota", "", str(quota_calc)),
+                            ]
+                            escribir_correccion(
+                                carpeta_cliente, nombre, cambios,
+                                f"desglose invers, IVA inclòs {tipo}%", qui,
+                            )
+                            st.toast(
+                                f"Desglose aplicat: {tipo}% -> base {base_calc} €, quota {quota_calc} €",
+                                icon="✅",
+                            )
+                            st.rerun()
             for aviso in avisos_verificacion_ficha(datos):
                 st.caption(f"⚠ {aviso}")
             if datos.get("observaciones"):

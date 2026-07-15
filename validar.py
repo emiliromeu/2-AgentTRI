@@ -248,6 +248,14 @@ def aplicar_correcciones(datos, correcciones_archivo):
         coincide_linea = re.match(r"lineas_iva\[(\d+)\]\.(\w+)", camp)
         if coincide_linea:
             indice, subcampo = int(coincide_linea.group(1)), coincide_linea.group(2)
+            # Piso 13Z: si la correcció apunta a una línia que encara no
+            # existeix (cas de "IVA inclòs" -- lineas_iva neix buida i el
+            # botó de desglose escriu la línia 0 des de zero), s'estén la
+            # llista amb {} fins a l'índex -- mai IndexError.
+            if datos.get("lineas_iva") is None:
+                datos["lineas_iva"] = []
+            while len(datos["lineas_iva"]) <= indice:
+                datos["lineas_iva"].append({})
             antic = datos["lineas_iva"][indice].get(subcampo)
             nuevo = convertir_valor(subcampo, correccion["valor_nou"])
             if nuevo is None and subcampo in CAMPOS_NUMERICOS and correccion["valor_nou"].strip():
@@ -370,6 +378,20 @@ for fila in todos_clientes:
                     motivos.append(f"campo obligatorio vacío: {campo}")
 
             lineas = datos.get("lineas_iva") or []
+
+            # Piso 13Z: el paper diu "IVA inclòs" sense desglosar -- mai
+            # s'inventa un desglose a l'extracció (extraer_todas.py ja ho
+            # deixa lineas_iva buida a proposit). Es queda PENDENT fins que
+            # una persona confirmi el tipus (app.py, targeta amb la
+            # matemàtica en viu) -- el xec de "total no cuadra" de mes avall
+            # no te sentit aqui (no hi ha cap linia amb que contrastar-lo) i
+            # se salta expressament per no duplicar soroll.
+            iva_inclos_sense_desglosar = bool(datos.get("iva_inclos_detectat")) and not lineas
+            if iva_inclos_sense_desglosar:
+                tipus_impres = datos.get("tipus_impres")
+                etiqueta_tipus = f"{tipus_impres}%" if tipus_impres is not None else "ninguno"
+                motivos.append(f"IVA incluido sin desglosar (tipo impreso: {etiqueta_tipus})")
+
             for i, linea in enumerate(lineas, start=1):
                 tipo = linea.get("tipo_iva")
                 base = linea.get("base")
@@ -397,7 +419,7 @@ for fila in todos_clientes:
                 )
 
             total = datos.get("total")
-            if total is not None:
+            if total is not None and not iva_inclos_sense_desglosar:
                 suma = sum((l.get("base") or 0) + (l.get("cuota") or 0) for l in lineas)
                 if abs(suma - total) > TOLERANCIA:
                     # Piso 13Y: alguns papers (lloguers, professionals,
