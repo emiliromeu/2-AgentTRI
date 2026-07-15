@@ -122,6 +122,8 @@ TRADUCCIONES_MOTIVO = [
     ("las dos partes son el cliente", "les dues parts són el client"),
     ("IVA incluido sin desglosar (tipo impreso:", "IVA inclòs sense desglosar (tipus imprès:"),
     ("ninguno)", "cap)"),
+    ("marcada como exenta pero tiene tipo/cuota distintos de 0 -- corrige la línea (tipo 0, cuota 0) o desmarca exenta",
+     "marcada com a exempta però té tipus/quota diferents de 0 -- corregeix la línia (tipus 0, quota 0) o desmarca exempta"),
 ]
 
 

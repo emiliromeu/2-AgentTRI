@@ -210,7 +210,7 @@ sin texto antes ni despues, sin bloques de markdown:
   "receptor": "...",
   "nif_receptor": "...",
   "lineas_iva": [
-    { "tipo_iva": 0, "base": 0.0, "cuota": 0.0 }
+    { "tipo_iva": 0, "base": 0.0, "cuota": 0.0, "exenta": false }
   ],
   "total": 0.0,
   "retencion_pct": 0,
@@ -223,7 +223,7 @@ sin texto antes ni despues, sin bloques de markdown:
 
 Reglas:
 - lineas_iva es una lista: si la factura tiene dos tipos de IVA, incluye dos elementos.
-- exenta = true si la factura indica que esta exenta de IVA.
+- exenta a nivel de LÍNEA (dentro de lineas_iva) = true si esa partida concreta está exenta de IVA (en ese caso tipo_iva y cuota de esa línea deben ser 0). Si TODAS las partidas están exentas, márcalo en todas; si SOLO ALGUNAS lo están, marca exenta únicamente en esas líneas y deja el resto con su tipo real. El campo "exenta" de factura (fuera de lineas_iva) es informativo/derivado — el sistema lo recalcula siempre a partir de las líneas, puedes dejarlo a false.
 - Si el documento dice "IVA incluido"/"IVA inclòs" SIN desglosar base y cuota por separado: lineas_iva se queda VACÍA ([]), iva_inclos_detectat = true, y tipus_impres es el tipo de IVA (numero) SOLO si el propio documento lo indica explícitamente (ej. "21% IVA incluido"), o null si no lo indica. NUNCA inventes el desglose (base = total/(1+tipo/100)) — esa es una cuenta que hace la persona despues, no la extracción. observaciones debe citar el texto literal del documento sobre el IVA incluido.
 - Si un campo no aparece en el PDF, ponlo a null. Nunca inventes un valor.
 - Si la factura no menciona retención, retencion_pct y retencion_cuota son 0. null se reserva para campos que deberían verse y no se pueden leer.

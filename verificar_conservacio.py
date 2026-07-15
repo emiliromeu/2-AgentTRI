@@ -96,7 +96,11 @@ def cuadre_esperado(facturas, decisiones):
     """Base/quota per tipus (incl. "otros"/"exenta"), total i retenció
     de les factures que COMPTEN -- estado==OK o decisió aprovar, mai
     descartar. Mateixa regla que sumar_bloque, calculada aquí en
-    independència total."""
+    independència total.
+
+    Piso 14B: exenta és un camp DE LÍNIA (validar.py ja el resol i
+    deriva el de factura) -- una factura mixta reparteix cada línia
+    al seu cub, igual que sumar_bloque."""
     sumas = {t: {"base": 0.0, "cuota": 0.0} for t in TIPOS_IVA}
     sumas["otros"] = {"base": 0.0, "cuota": 0.0}
     sumas["exenta"] = {"base": 0.0, "cuota": 0.0}
@@ -111,7 +115,7 @@ def cuadre_esperado(facturas, decisiones):
             continue
         for linea in datos.get("lineas_iva") or []:
             tipo = linea.get("tipo_iva")
-            clave = "exenta" if datos.get("exenta") else (tipo if tipo in TIPOS_IVA else "otros")
+            clave = "exenta" if linea.get("exenta") else (tipo if tipo in TIPOS_IVA else "otros")
             sumas[clave]["base"] += linea.get("base") or 0
             sumas[clave]["cuota"] += linea.get("cuota") or 0
         total += datos.get("total") or 0

@@ -188,6 +188,8 @@ TRADUCCIONES_MOTIVO = [
     ("las dos partes son el cliente", "les dues parts són el client"),
     ("IVA incluido sin desglosar (tipo impreso:", "IVA inclòs sense desglosar (tipus imprès:"),
     ("ninguno)", "cap)"),
+    ("marcada como exenta pero tiene tipo/cuota distintos de 0 -- corrige la línea (tipo 0, cuota 0) o desmarca exenta",
+     "marcada com a exempta però té tipus/quota diferents de 0 -- corregeix la línia (tipus 0, quota 0) o desmarca exempta"),
 ]
 
 
@@ -763,7 +765,11 @@ def sumar_bloque(facturas, decisiones):
     (solo base, la cuota de una exenta coherente siempre es 0 -- lo
     garantiza la validacion nueva de validar.py antes de que la ficha
     pueda llegar a OK/aprovar) -- separado del cubo del tipo 0% real,
-    que sigue significando exactamente lo mismo que antes."""
+    que sigue significando exactamente lo mismo que antes.
+
+    Piso 14B: exenta es un campo POR LÍNIA (validar.py ja el resol i
+    deriva el de factura) -- una factura mixta (una línia exempta,
+    una altra al 21%) reparteix cada línia al seu cub."""
     sumas = {tipo: {"base": 0.0, "cuota": 0.0} for tipo in TIPOS_IVA}
     sumas["otros"] = {"base": 0.0, "cuota": 0.0}
     sumas["exenta"] = {"base": 0.0, "cuota": 0.0}
@@ -786,7 +792,7 @@ def sumar_bloque(facturas, decisiones):
 
         for linea in datos.get("lineas_iva") or []:
             tipo = linea.get("tipo_iva")
-            if datos.get("exenta"):
+            if linea.get("exenta"):
                 clave = "exenta"
             else:
                 clave = tipo if tipo in TIPOS_IVA else "otros"
@@ -894,12 +900,18 @@ def escribir_formulas_bloque(ws, info, rango_detalle, sumas, total_ok, retencion
         celda_cuota = ws.cell(row=fila_tipo, column=3)
         if not filas_tipo:
             celda_base.value = 0
-            celda_cuota.value = 0
+            # Piso 14B: el cub Exempta mai porta un 0,00 de quota
+            # enganyós -- es queda buit (la quota d'una línia exempta
+            # coherent és sempre 0 per construcció, validar.py ho
+            # garanteix; no cal ni fórmula ni verificar-la).
+            if tipo != "exenta":
+                celda_cuota.value = 0
             continue
         celda_base.value = _formula_suma_filas(COLUMNA_BASE_DETALLE, filas_tipo)
-        celda_cuota.value = _formula_suma_filas(COLUMNA_QUOTA_DETALLE, filas_tipo)
         comprobaciones.append((celda_base.coordinate, "multi", COLUMNA_BASE_DETALLE, tuple(filas_tipo), round(sumas[tipo]["base"], 2)))
-        comprobaciones.append((celda_cuota.coordinate, "multi", COLUMNA_QUOTA_DETALLE, tuple(filas_tipo), round(sumas[tipo]["cuota"], 2)))
+        if tipo != "exenta":
+            celda_cuota.value = _formula_suma_filas(COLUMNA_QUOTA_DETALLE, filas_tipo)
+            comprobaciones.append((celda_cuota.coordinate, "multi", COLUMNA_QUOTA_DETALLE, tuple(filas_tipo), round(sumas[tipo]["cuota"], 2)))
 
     rango_bloque = rango_detalle["bloque"]
     fila_total = info["fila_total"]
@@ -1298,9 +1310,9 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
         fila_inicio_factura = fila
         for linea in (datos.get("lineas_iva") or [{}]):
             tipo = linea.get("tipo_iva")
-            # Piso 13R: una fitxa exenta=true forma el seu propi cub
-            # "exenta", separat del tipus real de la línia.
-            clave_tipo = "exenta" if datos.get("exenta") else (tipo if tipo in TIPOS_IVA else "otros")
+            # Piso 14B: exenta es un camp DE LÍNIA -- cada línia va al
+            # seu cub, encara que la factura sigui mixta.
+            clave_tipo = "exenta" if linea.get("exenta") else (tipo if tipo in TIPOS_IVA else "otros")
             rango_tipos.setdefault(clave_tipo, []).append(fila)
             _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, carpeta_cliente, decision, nombres_ya_mostrados)
             fila += 1

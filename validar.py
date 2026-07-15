@@ -233,7 +233,21 @@ def aplicar_correcciones(datos, correcciones_archivo):
     (no vacio) a_numero() no ha podido convertir. Antes esto lanzaba
     ValueError sin capturar (float() a secas) y tumbaba el batch
     entero; ahora simplemente se anota para que el bucle principal lo
-    convierta en un motivo REVISAR."""
+    convierta en un motivo REVISAR.
+
+    Piso 14B: "lineas_iva[N]" SIN subcampo (nunca choca con el patron
+    "lineas_iva[N].subcampo" -- este exige un punto+palabra detras)
+    significa "elimina la linea N entera" -- app.py siempre escribe
+    las eliminaciones DESPUES de los edits de linias que se mantienen,
+    en orden de indice DESCENDENTE dentro de un mismo "Guardar canvis"
+    (eliminar el indice mas alto primero nunca desplaza uno mas bajo
+    todavia pendiente). Como correcciones_archivo ya se recorre en
+    orden cronologico estricto -- nunca se difieren las eliminaciones
+    a un paso final global -- esto es correcto tambien entre sesiones
+    de correccion distintas a lo largo del tiempo: cada indice
+    escrito por app.py es siempre relativo al estado que existia
+    justo despues de las correcciones anteriores, exactamente el que
+    ve la persona en su UI en ese momento."""
     if not correcciones_archivo:
         return datos, [], []
 
@@ -245,8 +259,15 @@ def aplicar_correcciones(datos, correcciones_archivo):
     correcciones_illegibles = []
     for correccion in correcciones_archivo:
         camp = correccion["camp"]
+        coincide_eliminar = re.match(r"lineas_iva\[(\d+)\]$", camp)
         coincide_linea = re.match(r"lineas_iva\[(\d+)\]\.(\w+)", camp)
-        if coincide_linea:
+        if coincide_eliminar:
+            indice = int(coincide_eliminar.group(1))
+            antic = correccion.get("valor_antic")
+            nuevo = "ELIMINADA"
+            if datos.get("lineas_iva") and 0 <= indice < len(datos["lineas_iva"]):
+                datos["lineas_iva"].pop(indice)
+        elif coincide_linea:
             indice, subcampo = int(coincide_linea.group(1)), coincide_linea.group(2)
             # Piso 13Z: si la correcció apunta a una línia que encara no
             # existeix (cas de "IVA inclòs" -- lineas_iva neix buida i el
@@ -369,6 +390,20 @@ for fila in todos_clientes:
             for campo, valor_cru in illegibles_numeros:
                 motivos.append(f"importe numérico ilegible en {campo}: '{valor_cru}'")
 
+            # Piso 14B: exenta esdevé un camp DE LÍNIA -- es resol AQUÍ,
+            # abans del xec de camps obligatoris, perquè "exenta" mai
+            # sigui None (retrocompatibilitat: una línia sense el seu
+            # propi "exenta" hereta el valor de factura -- una fitxa
+            # vella amb exenta=true i cap línia amb el camp queda com
+            # abans, totes exemptes; una fitxa normal, exenta=false,
+            # tampoc canvia). El camp de factura queda DERIVAT: true
+            # només si TOTES les línies ho són.
+            lineas = datos.get("lineas_iva") or []
+            for linea in lineas:
+                if linea.get("exenta") is None:
+                    linea["exenta"] = bool(datos.get("exenta"))
+            datos["exenta"] = bool(lineas) and all(l.get("exenta") for l in lineas)
+
             for campo in CAMPOS_OBLIGATORIOS:
                 # Piso 13Q: si ya sabemos que estaba ilegible (no vacio, sino
                 # basura que a_numero() no ha podido convertir), no hace
@@ -376,8 +411,6 @@ for fila in todos_clientes:
                 # confuso, el campo no estaba vacío.
                 if datos.get(campo) is None and campo not in campos_illegibles:
                     motivos.append(f"campo obligatorio vacío: {campo}")
-
-            lineas = datos.get("lineas_iva") or []
 
             # Piso 13Z: el paper diu "IVA inclòs" sense desglosar -- mai
             # s'inventa un desglose a l'extracció (extraer_todas.py ja ho
@@ -413,19 +446,16 @@ for fila in todos_clientes:
                     motivos.append(
                         f"línea {i}: {base} × {tipo}% = {esperado:.2f}, pero cuota indica {cuota}"
                     )
-
-            # Piso 13R: coherencia exenta -- antes "exenta" no se contrastaba
-            # contra las propias líneas de IVA, así que una ficha podía
-            # quedar marcada exenta con líneas de IVA real por debajo,
-            # silenciosamente incoherente. corregir sigue sin autoaprobarse
-            # (la doctrina de aplicar_correcciones no cambia): esta ficha
-            # simplemente vuelve a REVISAR con el motivo de abajo hasta que
-            # las líneas queden a 0 o se desmarque exenta.
-            if datos.get("exenta") and any((l.get("tipo_iva") or 0) > 0 or (l.get("cuota") or 0) > 0 for l in lineas):
-                motivos.append(
-                    "marcada como exenta pero tiene líneas con IVA -- corrige las líneas "
-                    "(tipo 0, cuota 0) o desmarca exenta"
-                )
+                # Piso 14B: coherencia exenta POR LÍNEA -- reemplaza el xec
+                # factura-level de Piso 13R (ara exenta és un camp de
+                # línia, no de factura). corregir sigue sin autoaprobarse:
+                # esta línea simplemente vuelve a REVISAR con el motivo de
+                # abajo hasta que quede a 0 o se desmarqui exenta.
+                if linea.get("exenta") and (tipo != 0 or abs(cuota) > TOLERANCIA):
+                    motivos.append(
+                        f"línea {i} marcada como exenta pero tiene tipo/cuota distintos de 0 -- "
+                        "corrige la línea (tipo 0, cuota 0) o desmarca exenta"
+                    )
 
             total = datos.get("total")
             if total is not None and not iva_inclos_sense_desglosar:

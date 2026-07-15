@@ -826,12 +826,13 @@ def entrada_manual_factura(fila_afegir, carpeta):
             st.session_state[f"manual_tipo_{i}"] = ""
             st.session_state[f"manual_base_{i}"] = ""
             st.session_state[f"manual_cuota_{i}"] = ""
+            # Piso 14B: exempta ja és per línia, no de factura.
+            st.session_state[f"manual_exenta_{i}"] = False
         st.session_state["manual_n_linies"] = 1
         st.session_state["manual_qui"] = ""
         st.session_state["manual_contrapart_nom"] = ""
         st.session_state["manual_contrapart_nif"] = ""
         st.session_state["manual_num_factura"] = ""
-        st.session_state["manual_exenta"] = False
         st.session_state["manual_porta_retencio"] = False
         st.session_state["manual_retencio_pct"] = ""
         st.session_state["manual_retencio_cuota"] = ""
@@ -863,10 +864,6 @@ def entrada_manual_factura(fila_afegir, carpeta):
     with col_data:
         data_factura_manual = st.date_input("Data de factura", key="manual_data_factura")
 
-    exempta_manual = st.checkbox("Exempta", key="manual_exenta")
-    if exempta_manual:
-        st.caption("⚠️ una factura exempta no porta IVA — revisa les línies")
-
     # Piso 13X: llista dinàmica de línies d'IVA -- comptador propi a
     # session_state (afegir/treure una línia), mateix mode de la resta
     # del formulari (fora de st.form, per a les pistes en viu).
@@ -876,9 +873,15 @@ def entrada_manual_factura(fila_afegir, carpeta):
     lineas_manuals = []
     for i in range(st.session_state["manual_n_linies"]):
         st.caption(f"Línia {i + 1}")
+        # Piso 14B: exempta és per línia -- cada línia porta la seva
+        # pròpia casella, amb la mateixa cascada tipus=0/quota=0 en viu.
+        key_exenta = f"manual_exenta_{i}"
+        exempta_linia = st.checkbox(f"Exempta [{i + 1}]", key=key_exenta)
+        if exempta_linia:
+            st.caption("⚠️ aquesta línia no porta IVA")
         col_t, col_b, col_c = st.columns(3)
         key_tipo, key_base, key_cuota = f"manual_tipo_{i}", f"manual_base_{i}", f"manual_cuota_{i}"
-        if exempta_manual:
+        if exempta_linia:
             # Assignat ABANS de crear el text_input d'aquesta key en
             # aquesta mateixa execució -- mateixa cascada que Corregir camps.
             st.session_state[key_tipo] = "0"
@@ -892,7 +895,7 @@ def entrada_manual_factura(fila_afegir, carpeta):
         base_num, tipo_num = a_numero(b), a_numero(t)
         if base_num is not None and tipo_num is not None:
             st.caption(f"{base_num} × {tipo_num}% = {base_num * tipo_num / 100:.2f} — coincideix amb el paper?")
-        lineas_manuals.append((t, b, c))
+        lineas_manuals.append((t, b, c, exempta_linia))
 
     col_add, col_treure = st.columns(2)
     with col_add:
@@ -914,7 +917,7 @@ def entrada_manual_factura(fila_afegir, carpeta):
     else:
         retencio_pct_manual, retencio_cuota_manual = "0", "0.0"
 
-    suma_calculada = sum((a_numero(b) or 0) + (a_numero(c) or 0) for _, b, c in lineas_manuals)
+    suma_calculada = sum((a_numero(b) or 0) + (a_numero(c) or 0) for _, b, c, _ in lineas_manuals)
     st.caption(f"Suma de línies (bases+quotes): {suma_calculada:.2f} — coincideix amb el total del paper?")
     total_manual = st.text_input("Total", key="manual_total")
 
@@ -953,13 +956,14 @@ def entrada_manual_factura(fila_afegir, carpeta):
                 "receptor": receptor_final,
                 "nif_receptor": nif_receptor_final,
                 "lineas_iva": [
-                    {"tipo_iva": a_numero(t), "base": a_numero(b), "cuota": a_numero(c)}
-                    for t, b, c in lineas_manuals
+                    {"tipo_iva": a_numero(t), "base": a_numero(b), "cuota": a_numero(c), "exenta": exenta_i}
+                    for t, b, c, exenta_i in lineas_manuals
                 ],
                 "total": a_numero(total_manual),
                 "retencion_pct": a_numero(retencio_pct_manual) or 0,
                 "retencion_cuota": a_numero(retencio_cuota_manual) or 0.0,
-                "exenta": exempta_manual,
+                # Piso 14B: "exenta" de factura ja no s'envia -- validar.py
+                # el deriva sempre de les línies (totes exemptes o cap).
                 "observaciones": None,
                 "origen": "manual",
                 "qui": qui_manual,
@@ -1122,7 +1126,7 @@ CAMPOS_CORRECCIONS_CSV = ["arxiu", "camp", "valor_antic", "valor_nou", "motiu", 
 CAMPOS_CORREGIBLES_TOP = [
     "proveedor", "nif_proveedor", "num_factura", "fecha_factura",
     "receptor", "nif_receptor", "total", "retencion_pct",
-    "retencion_cuota", "exenta", "observaciones",
+    "retencion_cuota", "observaciones",
 ]
 
 
@@ -1161,8 +1165,8 @@ TRADUCCIONES_MOTIVO = [
      "el client no apareix ni com a emissor ni com a receptor"),
     ("las dos partes son el cliente", "les dues parts són el client"),
     ("importe numérico ilegible en", "import numèric il·legible a"),
-    ("marcada como exenta pero tiene líneas con IVA -- corrige las líneas (tipo 0, cuota 0) o desmarca exenta",
-     "marcada com a exempta però té línies amb IVA -- corregeix les línies (tipus 0, quota 0) o desmarca exempta"),
+    ("marcada como exenta pero tiene tipo/cuota distintos de 0 -- corrige la línea (tipo 0, cuota 0) o desmarca exenta",
+     "marcada com a exempta però té tipus/quota diferents de 0 -- corregeix la línia (tipus 0, quota 0) o desmarca exempta"),
     ("retención no cuadra:", "la retenció no quadra:"),
     ("pero retencion_cuota indica", "però la retenció indica"),
     ("IVA incluido sin desglosar (tipo impreso:", "IVA inclòs sense desglosar (tipus imprès:"),
@@ -2109,19 +2113,8 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
         # just abans del seu propi st.rerun() de sempre.
         # Piso 13X: totes les keys que aquest diàleg fa servir -- calen per
         # "oblidar" qualsevol edició abandonada (vegeu _reiniciar_correccio).
-        n_linies_actual = len(datos.get("lineas_iva") or [])
-
-        def _keys_correccio():
-            keys = [f"{prefijo}_correccio_{camp}_{nombre}" for camp in CAMPOS_CORREGIBLES_TOP if camp != "exenta"]
-            keys.append(f"{prefijo}_correccio_exenta_{nombre}")
-            for i in range(n_linies_actual):
-                keys += [
-                    f"{prefijo}_correccio_tipo_{i}_{nombre}",
-                    f"{prefijo}_correccio_base_{i}_{nombre}",
-                    f"{prefijo}_correccio_cuota_{i}_{nombre}",
-                ]
-            keys.append(f"{prefijo}_correccio_motiu_{nombre}")
-            return keys
+        n_linies_originals = len(datos.get("lineas_iva") or [])
+        key_n_extra = f"{prefijo}_correccio_n_extra_{nombre}"
 
         def _reiniciar_correccio():
             """Piso 13X: FORENSE confirmat en directe -- les keys d'aquest
@@ -2137,9 +2130,26 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
             el "0" de l'intent anterior, no el 21 real de la fitxa. Es
             crida ABANS d'obrir el diàleg (botó "Corregir camps") i en
             Cancel·lar -- mai després d'instanciar cap widget d'aquestes
-            keys en aquesta mateixa execució."""
-            for key in _keys_correccio():
-                st.session_state.pop(key, None)
+            keys en aquesta mateixa execució.
+
+            Piso 14B: les línies extra (afegides aquesta sessió, mai
+            desades) i les marques de "treure" també son estat abandonat
+            si es cancel·la -- es netegen igual que la resta. Es llegeix
+            n_extra ABANS d'esborrar-lo (calen per saber quantes keys de
+            línia extra hi ha per netejar)."""
+            n_extra_previ = st.session_state.get(key_n_extra, 0)
+            for i in range(n_linies_originals + n_extra_previ):
+                st.session_state.pop(f"{prefijo}_correccio_tipo_{i}_{nombre}", None)
+                st.session_state.pop(f"{prefijo}_correccio_base_{i}_{nombre}", None)
+                st.session_state.pop(f"{prefijo}_correccio_cuota_{i}_{nombre}", None)
+                st.session_state.pop(f"{prefijo}_correccio_linexenta_{i}_{nombre}", None)
+            for i in range(n_linies_originals):
+                st.session_state.pop(f"{prefijo}_correccio_treure_marcada_{i}_{nombre}", None)
+                st.session_state.pop(f"{prefijo}_correccio_treure_confirmar_{i}_{nombre}", None)
+            st.session_state.pop(key_n_extra, None)
+            for camp in CAMPOS_CORREGIBLES_TOP:
+                st.session_state.pop(f"{prefijo}_correccio_{camp}_{nombre}", None)
+            st.session_state.pop(f"{prefijo}_correccio_motiu_{nombre}", None)
 
         @st.dialog("Corregir camps", on_dismiss=_tancar_popover)
         def dialog_corregir_camps():
@@ -2147,60 +2157,112 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                 "La fitxa corregida torna a passar tota la validació -- "
                 "corregir no aprova. Cal RECALCULAR després de desar."
             )
-            # Piso 13X: exenta és l'ÚNIC camp booleà de l'esquema -- casella,
-            # mai text "True"/"False". Viu FORA del form perquè la cascada
-            # de línies (tipus=0, quota=0) sigui EN VIU en marcar-la (un
-            # checkbox dins d'un st.form no reacciona fins que se sotmet).
-            key_exenta = f"{prefijo}_correccio_exenta_{nombre}"
-            exempta_marcada = st.checkbox(
-                "exenta", value=bool(datos.get("exenta")), key=key_exenta,
-            )
-            if exempta_marcada:
-                st.caption("⚠️ una factura exempta no porta IVA — revisa les línies")
-                for i in range(n_linies_actual):
-                    # Assignat ABANS de crear el text_input d'aquesta key en
-                    # aquesta mateixa execució -- mai després (regla establerta
-                    # al projecte).
-                    st.session_state[f"{prefijo}_correccio_tipo_{i}_{nombre}"] = "0"
-                    st.session_state[f"{prefijo}_correccio_cuota_{i}_{nombre}"] = "0"
 
-            with st.form(key=f"form_correccio_{prefijo}_{nombre}", border=False):
-                valors_nous = {}
-                for camp in CAMPOS_CORREGIBLES_TOP:
-                    if camp == "exenta":
-                        continue
-                    valor_actual = datos.get(camp)
-                    valors_nous[camp] = st.text_input(
-                        camp,
-                        value="" if valor_actual is None else str(valor_actual),
-                        key=f"{prefijo}_correccio_{camp}_{nombre}",
+            # Piso 14B: cap st.form -- les línies dinàmiques (afegir/treure)
+            # necessiten un rerun immediat en cada clic, exactament el
+            # mateix problema (i solució) que entrada_manual_factura ja
+            # va resoldre vivint fora d'un form.
+            valors_nous = {}
+            for camp in CAMPOS_CORREGIBLES_TOP:
+                valor_actual = datos.get(camp)
+                valors_nous[camp] = st.text_input(
+                    camp,
+                    value="" if valor_actual is None else str(valor_actual),
+                    key=f"{prefijo}_correccio_{camp}_{nombre}",
+                )
+
+            if key_n_extra not in st.session_state:
+                st.session_state[key_n_extra] = 0
+
+            st.markdown("**Línies d'IVA**")
+            lineas_originals = datos.get("lineas_iva") or []
+            lineas_nuevas = []
+            marcades_per_treure = []
+            for i in range(n_linies_originals + st.session_state[key_n_extra]):
+                es_original = i < n_linies_originals
+                linea_actual = lineas_originals[i] if es_original else {}
+                key_marcada = f"{prefijo}_correccio_treure_marcada_{i}_{nombre}"
+                key_confirmar = f"{prefijo}_correccio_treure_confirmar_{i}_{nombre}"
+
+                # Piso 14B: "treure línia" amb confirmació inline de dos
+                # clics -- mai un sol clic esborra res (regla 10, cap
+                # acció destructiva silenciosa).
+                if es_original and st.session_state.get(key_marcada):
+                    st.warning(f"Línia {i + 1}: s'eliminarà en desar.")
+                    if st.button(f"Desfés (mantenir línia {i + 1})", key=f"{prefijo}_desfer_treure_{i}_{nombre}"):
+                        st.session_state[key_marcada] = False
+                        # Piso 13H: scope="fragment" -- mai tancar el dialog
+                        # per una interacció intermèdia, nomes en sortir-ne
+                        # (Guardar/Cancel·lar).
+                        st.rerun(scope="fragment")
+                    marcades_per_treure.append(i)
+                    continue
+
+                if es_original and st.session_state.get(key_confirmar):
+                    st.caption(f"⚠️ Segur que vols treure la línia {i + 1}?")
+                    col_si, col_no = st.columns(2)
+                    with col_si:
+                        if st.button("Sí, treure", key=f"{prefijo}_treure_si_{i}_{nombre}", type="primary"):
+                            st.session_state[key_marcada] = True
+                            st.session_state[key_confirmar] = False
+                            st.rerun(scope="fragment")
+                    with col_no:
+                        if st.button("Cancel·lar", key=f"{prefijo}_treure_no_{i}_{nombre}"):
+                            st.session_state[key_confirmar] = False
+                            st.rerun(scope="fragment")
+                    continue
+
+                st.caption(f"Línia {i + 1}" + ("" if es_original else " (nova)"))
+                key_exenta_i = f"{prefijo}_correccio_linexenta_{i}_{nombre}"
+                # Piso 14B: exempta és per línia -- mateixa cascada en viu
+                # que entrada_manual_factura (checkbox FORA del form).
+                exempta_linia = st.checkbox(
+                    f"Exempta [{i + 1}]", value=bool(linea_actual.get("exenta")), key=key_exenta_i,
+                )
+                key_tipo = f"{prefijo}_correccio_tipo_{i}_{nombre}"
+                key_base = f"{prefijo}_correccio_base_{i}_{nombre}"
+                key_cuota = f"{prefijo}_correccio_cuota_{i}_{nombre}"
+                if exempta_linia:
+                    st.session_state[key_tipo] = "0"
+                    st.session_state[key_cuota] = "0"
+                col_t, col_b, col_c = st.columns(3)
+                valor_tipo_previ = linea_actual.get("tipo_iva")
+                valor_base_previ = linea_actual.get("base")
+                valor_cuota_previ = linea_actual.get("cuota")
+                with col_t:
+                    t = st.text_input(
+                        f"tipo_iva[{i}]",
+                        value="" if valor_tipo_previ is None else str(valor_tipo_previ),
+                        key=key_tipo,
                     )
-                lineas_nuevas = []
-                for i, linea in enumerate(datos.get("lineas_iva") or []):
-                    st.caption(f"Línia {i}")
-                    col_t, col_b, col_c = st.columns(3)
-                    with col_t:
-                        t = st.text_input(
-                            f"tipo_iva[{i}]", value=str(linea.get("tipo_iva")),
-                            key=f"{prefijo}_correccio_tipo_{i}_{nombre}",
-                        )
-                    with col_b:
-                        b = st.text_input(
-                            f"base[{i}]", value=str(linea.get("base")),
-                            key=f"{prefijo}_correccio_base_{i}_{nombre}",
-                        )
-                    with col_c:
-                        c = st.text_input(
-                            f"cuota[{i}]", value=str(linea.get("cuota")),
-                            key=f"{prefijo}_correccio_cuota_{i}_{nombre}",
-                        )
-                    lineas_nuevas.append((i, t, b, c))
-                motiu_correccio = st.text_input("Motiu (obligatori)", key=f"{prefijo}_correccio_motiu_{nombre}")
-                col_guardar, col_cancelar = st.columns(2)
-                with col_guardar:
-                    click_guardar = st.form_submit_button("Guardar canvis", type="primary")
-                with col_cancelar:
-                    click_cancelar = st.form_submit_button("Cancel·lar")
+                with col_b:
+                    b = st.text_input(
+                        f"base[{i}]",
+                        value="" if valor_base_previ is None else str(valor_base_previ),
+                        key=key_base,
+                    )
+                with col_c:
+                    c = st.text_input(
+                        f"cuota[{i}]",
+                        value="" if valor_cuota_previ is None else str(valor_cuota_previ),
+                        key=key_cuota,
+                    )
+                if es_original:
+                    if st.button(f"🗑 Treure la línia {i + 1}", key=f"{prefijo}_treure_obrir_{i}_{nombre}"):
+                        st.session_state[key_confirmar] = True
+                        st.rerun(scope="fragment")
+                lineas_nuevas.append((i, t, b, c, exempta_linia, es_original))
+
+            if st.button("+ Afegir línia d'IVA", key=f"{prefijo}_correccio_afegir_linia_{nombre}"):
+                st.session_state[key_n_extra] += 1
+                st.rerun(scope="fragment")
+
+            motiu_correccio = st.text_input("Motiu (obligatori)", key=f"{prefijo}_correccio_motiu_{nombre}")
+            col_guardar, col_cancelar = st.columns(2)
+            with col_guardar:
+                click_guardar = st.button("Guardar canvis", key=f"{prefijo}_correccio_guardar_{nombre}", type="primary")
+            with col_cancelar:
+                click_cancelar = st.button("Cancel·lar", key=f"{prefijo}_correccio_cancelar_{nombre}")
 
             if click_cancelar:
                 # Piso 13X: "restaura els valors originals" -- com les keys
@@ -2211,25 +2273,39 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
 
             if click_guardar:
                 cambios = []
-                valor_exenta_str = "True" if exempta_marcada else "False"
-                valor_exenta_antic_str = "True" if datos.get("exenta") else "False"
-                if valor_exenta_str != valor_exenta_antic_str:
-                    cambios.append(("exenta", valor_exenta_antic_str, valor_exenta_str))
                 for camp in CAMPOS_CORREGIBLES_TOP:
-                    if camp == "exenta":
-                        continue
                     valor_antic = datos.get(camp)
                     valor_antic_str = "" if valor_antic is None else str(valor_antic)
                     if valors_nous[camp] != valor_antic_str:
                         cambios.append((camp, valor_antic_str, valors_nous[camp]))
-                for i, t, b, c in lineas_nuevas:
-                    linea_actual = (datos.get("lineas_iva") or [])[i]
-                    if t != str(linea_actual.get("tipo_iva")):
-                        cambios.append((f"lineas_iva[{i}].tipo_iva", str(linea_actual.get("tipo_iva")), t))
-                    if b != str(linea_actual.get("base")):
-                        cambios.append((f"lineas_iva[{i}].base", str(linea_actual.get("base")), b))
-                    if c != str(linea_actual.get("cuota")):
-                        cambios.append((f"lineas_iva[{i}].cuota", str(linea_actual.get("cuota")), c))
+
+                for i, t, b, c, exenta_i, es_original in lineas_nuevas:
+                    linea_actual = lineas_originals[i] if es_original else {}
+                    antic_tipo, antic_base, antic_cuota = (
+                        linea_actual.get("tipo_iva"), linea_actual.get("base"), linea_actual.get("cuota"),
+                    )
+                    antic_tipo_str = "" if antic_tipo is None else str(antic_tipo)
+                    antic_base_str = "" if antic_base is None else str(antic_base)
+                    antic_cuota_str = "" if antic_cuota is None else str(antic_cuota)
+                    antic_exenta_str = str(bool(linea_actual.get("exenta")))
+                    if t != antic_tipo_str:
+                        cambios.append((f"lineas_iva[{i}].tipo_iva", antic_tipo_str, t))
+                    if b != antic_base_str:
+                        cambios.append((f"lineas_iva[{i}].base", antic_base_str, b))
+                    if c != antic_cuota_str:
+                        cambios.append((f"lineas_iva[{i}].cuota", antic_cuota_str, c))
+                    if str(exenta_i) != antic_exenta_str:
+                        cambios.append((f"lineas_iva[{i}].exenta", antic_exenta_str, str(exenta_i)))
+
+                # Piso 14B: eliminacions AL FINAL, ordre d'índex DESCENDENT
+                # -- seguretat de replay, veure aplicar_correcciones.
+                for i in sorted(marcades_per_treure, reverse=True):
+                    linea_actual = lineas_originals[i]
+                    resum_antic = (
+                        f"tipus {linea_actual.get('tipo_iva')}, base {linea_actual.get('base')}, "
+                        f"cuota {linea_actual.get('cuota')}"
+                    )
+                    cambios.append((f"lineas_iva[{i}]", resum_antic, "ELIMINADA"))
 
                 if not cambios:
                     st.info("Cap canvi per desar.")
@@ -2244,22 +2320,25 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
                     st.toast(f"{len(cambios)} camps: {resum_canvis}", icon="✅")
                     # Piso 13R: avís inline (mai bloquejant -- la doctrina no
                     # canvia, validar.py fa l'examen de veritat en el proper
-                    # Recalcular) si la correcció deixa la fitxa amb
-                    # exenta=true i alguna línia amb IVA. st.toast en comptes
-                    # de st.warning perquè el st.rerun() de sota esborraria
-                    # qualsevol missatge normal abans que es pogués llegir
-                    # (mateixa lliçó que Piso 13P).
+                    # Recalcular) si la correcció deixa alguna línia amb
+                    # exenta=true i tipus/quota diferents de 0. st.toast en
+                    # comptes de st.warning perquè el st.rerun() de sota
+                    # esborraria qualsevol missatge normal abans que es
+                    # pogués llegir (mateixa lliçó que Piso 13P).
                     def _es_positiu(texto):
                         try:
                             return float(texto) > 0
                         except (TypeError, ValueError):
                             return False
 
-                    te_iva = any(_es_positiu(t) or _es_positiu(c) for _, t, b, c in lineas_nuevas)
-                    if exempta_marcada and te_iva:
+                    linies_incoherents = [
+                        i + 1 for i, t, b, c, exenta_i, _ in lineas_nuevas
+                        if exenta_i and (_es_positiu(t) or _es_positiu(c))
+                    ]
+                    if linies_incoherents:
                         st.toast(
-                            "Marcada com a exempta amb línies d'IVA -- tornarà a REVISAR fins "
-                            "que corregeixis les línies (tipus 0, quota 0) o desmarquis exempta.",
+                            f"Línia(es) {', '.join(map(str, linies_incoherents))} marcada(es) exempta "
+                            "amb tipus/quota diferents de 0 -- tornarà a REVISAR fins que ho corregeixis.",
                             icon="⚠️",
                         )
                     # Piso 13H: comprobado en directe -- st.rerun(scope="fragment")
