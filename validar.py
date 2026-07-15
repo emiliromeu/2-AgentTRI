@@ -392,6 +392,15 @@ for fila in todos_clientes:
                 etiqueta_tipus = f"{tipus_impres}%" if tipus_impres is not None else "ninguno"
                 motivos.append(f"IVA incluido sin desglosar (tipo impreso: {etiqueta_tipus})")
 
+            # Piso 14: guàrdia de multituds -- extraer_todas.py anota
+            # aquest marcador literal a observaciones quan el document
+            # sembla contenir mes d'una factura (mai un camp estructurat
+            # nou). Sense re-extraccions automàtiques: es queda PENDENT
+            # perque una persona decideixi si cal reprocessar-lo com a
+            # lot d'escàner.
+            if "SEMBLA CONTENIR" in (datos.get("observaciones") or ""):
+                motivos.append("possible arxiu multi-factura -- reprocessar com a lot?")
+
             for i, linea in enumerate(lineas, start=1):
                 tipo = linea.get("tipo_iva")
                 base = linea.get("base")

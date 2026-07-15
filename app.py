@@ -979,7 +979,18 @@ def entrada_manual_factura(fila_afegir, carpeta):
             with open(os.path.join(carpeta_extraidas_manual, nombre_final_manual), "w", encoding="utf-8") as f:
                 json.dump(fitxa_manual, f, ensure_ascii=False, indent=2)
 
-            st.success(f"Fitxa manual desada: `{nombre_final_manual}`. Recalcula per fer-la passar la validació.")
+            # Piso 14: entrada manual es una mutacio com qualsevol altra
+            # -- ha d'encendre el semafor "sense recalcular" igual que
+            # decisions/moviments/retirs/correccions. escribir_entrada_manual
+            # deixa constancia a un ledger propi (mateix format que
+            # errors_retirats/registre.csv) perque
+            # contar_manuals_sense_recalcular pugui detectar-ho.
+            escribir_entrada_manual(carpeta_cliente_manual, nombre_final_manual, qui_manual)
+
+            st.success(
+                f"Fitxa manual desada: `{nombre_final_manual}`. "
+                "Recalcula per veure-la als resultats."
+            )
             st.session_state["manual_reset_senyal"] = True
             st.rerun()
 
@@ -1522,6 +1533,42 @@ def contar_retirs_sense_recalcular(carpeta_cliente):
     return contador
 
 
+def escribir_entrada_manual(carpeta_cliente, archivo, qui):
+    """Piso 14: ledger propi per a entrada_manual_factura -- mateix
+    format exacte (arxiu, qui, data) que errors_retirats/registre.csv,
+    perque contar_manuals_sense_recalcular pugui detectar-ho amb el
+    mateix patró que ja fan servir decisions/moviments/retirs. Abans
+    d'aquest piso una fitxa manual no encenia cap senyal de "sense
+    recalcular" -- una mutació real i invisible."""
+    ruta = os.path.join(carpeta_cliente, "entrades_manuals.csv")
+    escribir_cabecera = not os.path.exists(ruta)
+    with open(ruta, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if escribir_cabecera:
+            writer.writerow(["arxiu", "qui", "data"])
+        writer.writerow([archivo, qui, datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+
+
+def contar_manuals_sense_recalcular(carpeta_cliente):
+    """Piso 14: mateix patró exacte que contar_retirs_sense_recalcular
+    però per a entrades_manuals.csv (escrit per escribir_entrada_manual)."""
+    ruta_manuals = os.path.join(carpeta_cliente, "entrades_manuals.csv")
+    if not os.path.exists(ruta_manuals):
+        return 0
+    ruta_informe = os.path.join(carpeta_cliente, "informe_2026.html")
+    mtime_informe = os.path.getmtime(ruta_informe) if os.path.exists(ruta_informe) else 0
+    contador = 0
+    with open(ruta_manuals, encoding="utf-8") as f:
+        for fila in csv.DictReader(f):
+            try:
+                marca = datetime.strptime(fila.get("data", ""), "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                continue
+            if marca > mtime_informe:
+                contador += 1
+    return contador
+
+
 def tiene_correccion_pendiente(carpeta_cliente, nombre):
     """Piso 13H: mateix patro que contar_decisiones_sin_recalcular pero
     per a correccions.csv -- hi ha alguna fila d'aquesta fitxa escrita
@@ -1841,6 +1888,15 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
             motivos = [traducir_motivo(m) for m in (datos.get("motivos") or [])]
             if motivos:
                 st.warning("\n".join(f"- {m}" for m in motivos))
+            # Piso 14: guàrdia de multituds -- suggeriment nomes textual,
+            # mai automatitzat (cap re-extracció ni moviment sol). El
+            # camí real ja existeix: tornar a pujar l'arxiu com a Lot
+            # d'escàner des d'Afegir factures.
+            if any("possible arxiu multi-factura" in m for m in motivos):
+                st.caption(
+                    "💡 Torna a pujar-lo com a Lot d'escàner des d'Afegir factures "
+                    "perquè es trocegi automàticament."
+                )
 
             # Piso 13Z: "IVA inclòs" sense desglosar -- la màquina mai
             # inventa el desglose sola (extraer_todas.py ja ho deixa
@@ -1915,6 +1971,13 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
         with col_der:
             if ruta_original and extension in EXTENSIONES_IMAGEN:
                 st.image(ruta_original)
+            elif not ruta_original and datos.get("origen") == "manual":
+                # Piso 14: mateix fallback que informe.py::tarjeta_factura
+                # ja fa des de Piso 13X -- una fitxa manual MAI té
+                # original, mostrar el botó "Obrir original" nomes portava
+                # a "No s'ha trobat l'arxiu: ``" (ruta buida), confús i
+                # sense explicar per què (regla 10).
+                st.info(f"📝 ENTRADA MANUAL\n\n{datos.get('qui')}, {datos.get('data_entrada')}")
             else:
                 if ruta_original and extension == ".pdf":
                     imagen_pdf = previsualizar_pdf(ruta_original, os.path.getmtime(ruta_original))
@@ -2920,13 +2983,15 @@ elif vista == "Revisió":
         n_sin_recalcular = contar_decisiones_sin_recalcular(estado["carpeta_cliente"])
         n_moguts_sense_recalcular = contar_moviments_sense_recalcular(estado["carpeta_cliente"])
         n_retirs_sense_recalcular = contar_retirs_sense_recalcular(estado["carpeta_cliente"])
+        n_manuals_sense_recalcular = contar_manuals_sense_recalcular(estado["carpeta_cliente"])
 
         st.subheader(
             f"{n_pendents} pendents per decidir ({n_pendents_compres} compres · {n_pendents_vendes} vendes) · "
             f"{n_errores} errors per resoldre · "
             f"{n_decidits} decidits · {n_sin_recalcular} decisions noves sense recalcular · "
             f"{n_moguts_sense_recalcular} moguts sense recalcular · "
-            f"{n_retirs_sense_recalcular} retirs sense recalcular"
+            f"{n_retirs_sense_recalcular} retirs sense recalcular · "
+            f"{n_manuals_sense_recalcular} entrades manuals sense recalcular"
         )
 
         # Piso 11C: cada targeta es un @st.fragment -- Aprovar/Descartar/
@@ -2950,6 +3015,7 @@ elif vista == "Revisió":
             "RECALCULAR", key="revisio_recalcular",
             type="primary" if (
                 n_sin_recalcular > 0 or n_moguts_sense_recalcular > 0 or n_retirs_sense_recalcular > 0
+                or n_manuals_sense_recalcular > 0
             ) else "secondary",
         ):
             # Piso 13S: RECALCULAR crida la MATEIXA cadena (validar->sumar->

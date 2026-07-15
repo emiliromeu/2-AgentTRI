@@ -71,6 +71,7 @@ import json
 import os
 import re
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -380,6 +381,43 @@ def cargar_manifiestos(carpeta_lotes_procesados):
     return manifiestos
 
 
+TRADUCCION_TIPO_DOC = {
+    "factura": "factures", "abono": "abonaments", "albara": "albarans",
+    "liquidacion_ingreso": "liquidacions", "ruido": "soroll",
+}
+
+
+def detalle_lots(manifiestos):
+    """Piso 14: per cada lot, el recompte de documents per tipus tal com
+    ja ve al seu manifest (trocear.py) -- "lote_X.pdf -> 12 factures, 1
+    albarà, 2 soroll". No cal creuar amb els arxius presents: el
+    manifest ja es la font de veritat de quants documents de cada tipus
+    va contenir el lot."""
+    detall = []
+    for nombre_lote, documentos in manifiestos:
+        recompte = Counter(doc.get("tipo") for doc in documentos)
+        text = ", ".join(
+            f"{n} {TRADUCCION_TIPO_DOC.get(tipo, tipo)}" for tipo, n in sorted(recompte.items())
+        )
+        detall.append((nombre_lote, text, sum(n for t, n in recompte.items() if t != "ruido")))
+    return detall
+
+
+def contar_arxius_de_lots(manifiestos):
+    """Piso 14: quants arxius (documents que SÍ produeixen un JSON --
+    tot menys "ruido") ha aportat el conjunt de lots d'un flux."""
+    return sum(
+        1 for _, documentos in manifiestos for doc in documentos if doc.get("tipo") != "ruido"
+    )
+
+
+def es_arxiu_de_lot(nombre_archivo, bases_lote):
+    """Piso 14: un arxiu es "de lot" si el seu nom comença per
+    "{base_lote}_p" -- mateixa convenció que trocear.py ja escriu
+    (nombre_salida = f"{base_lote}_p{ini:03d}-{fin:03d}_{emisor}.ext")."""
+    return any(nombre_archivo.startswith(f"{base}_p") for base in bases_lote)
+
+
 # Piso 13K: igual que en sumar.py -- los dos molls posibles de un lot
 # ja processat (compres i vendes).
 CARPETAS_LOTES_PROCESADOS = ["rebudes/lotes_procesados", "apartados/lotes_vendes_procesados"]
@@ -518,9 +556,13 @@ def verificar_enlaces(ruta_html, carpeta_cliente):
             trencats.append(href)
         elif archivo_corrupto(ruta):
             corruptes.append(href)
+    # Piso 14: una targeta d'ENTRADA MANUAL mai té href (construir_enllac
+    # ja torna None) -- es compta a part, informatiu, MAI com a trencat.
+    manuals_sense_enllac = contenido.count("📝 ENTRADA MANUAL")
     print(
         f"{os.path.basename(carpeta_cliente)} / informe: {verificados} enllaços verificats, "
-        f"{len(trencats)} trencats, {len(corruptes)} corruptes"
+        f"{len(trencats)} trencats, {len(corruptes)} corruptes, "
+        f"{manuals_sense_enllac} manual sense enllaç"
     )
     for href in trencats:
         print(f"  TRENCAT: {href}")
@@ -795,24 +837,42 @@ def tabla_comparacion(filas):
     </table>"""
 
 
-def panel_conciliacio_flux(nombre_flux, presentes, extraidas, ok, pendents):
-    """Nomes lectura de disc -- cap re-execucio. 'Errors' es infereix
-    com presents-ok-pendents: valid nomes si extraer_todas.py ja ha
-    corregut a fons abans de generar aquest informe (aixi es com
-    ejecutar.py ho invoca -- informe.py es sempre l'ultima maquina)."""
-    errors = max(0, presentes - ok - pendents)
-    quadra = presentes == ok + pendents + errors
+def panel_conciliacio_flux(nombre_flux, arxius_lots, arxius_solts, manuals, extraidas, ok, pendents, detall_lots):
+    """Piso 14: "presents" es desglossa en 3 fonts explícites -- de
+    lots (comptades pel propi manifest, mai en silenci dins "presents"
+    com abans), arxius solts, i entrades manuals (Piso 13X ja les
+    sumava a presents per no trencar l'equació, ara amb la seva pròpia
+    línia visible). 'Errors' es infereix com arxius-ok-pendents: valid
+    nomes si extraer_todas.py ja ha corregut a fons abans de generar
+    aquest informe (aixi es com ejecutar.py ho invoca -- informe.py es
+    sempre l'ultima maquina)."""
+    arxius = arxius_lots + arxius_solts
+    total_presents = arxius + manuals
+    errors = max(0, total_presents - ok - pendents)
+    quadra = total_presents == ok + pendents + errors
+    detall_html = ""
+    if detall_lots:
+        files = "".join(f"<tr><td>{esc(nom)}</td><td>{esc(text)}</td></tr>" for nom, text, _ in detall_lots)
+        detall_html = f"""
+      <table class="conciliacio-lots">
+        <thead><tr><th>Lot</th><th>Documents</th></tr></thead>
+        <tbody>{files}</tbody>
+      </table>"""
     return f"""
     <div class="conciliacio-flux">
       <h4>{esc(nombre_flux)}</h4>
       <table class="conciliacio">
-        <tr><td>Presents</td><td class="num">{presentes}</td></tr>
+        <tr><td>Arxius de lots</td><td class="num">{arxius_lots}</td></tr>
+        <tr><td>Arxius solts</td><td class="num">{arxius_solts}</td></tr>
+        <tr><td>Entrades manuals</td><td class="num">{manuals}</td></tr>
         <tr><td>Fitxes extretes</td><td class="num">{extraidas}</td></tr>
         <tr><td>OK</td><td class="num">{ok}</td></tr>
         <tr><td>Pendents</td><td class="num">{pendents}</td></tr>
         <tr><td>Errors</td><td class="num">{errors}</td></tr>
       </table>
-      <p class="quadre">{presentes} presents = {ok} OK + {pendents} pendents + {errors} errors {"✓" if quadra else "⚠"}</p>
+      {detall_html}
+      <p class="quadre">{arxius} arxius ({arxius_lots} de lots + {arxius_solts} solts) + {manuals} manuals =
+      {ok} OK + {pendents} pendents + {errors} errors {"✓" if quadra else "⚠"}</p>
     </div>"""
 
 
@@ -938,6 +998,8 @@ h2 { border-bottom: 2px solid #D9E1F2; padding-bottom: 0.3rem; margin-top: 2.5re
 .conciliacio-flux table.conciliacio { width: 100%; margin: 0; }
 .conciliacio-flux table.conciliacio td { padding: 0.15rem 0.3rem; border: none; }
 .conciliacio-flux .quadre { font-size: 0.85rem; color: #555; margin-top: 0.5rem; }
+.conciliacio-flux table.conciliacio-lots { font-size: 0.8rem; margin: 0.5rem 0 0 0; }
+.conciliacio-flux table.conciliacio-lots th, .conciliacio-flux table.conciliacio-lots td { padding: 0.15rem 0.4rem; }
 .aparte { color: #555; font-size: 0.9rem; }
 
 table.comparacion { border-collapse: collapse; width: 100%; margin: 1rem 0 2rem 0; }
@@ -1039,21 +1101,34 @@ for fila_cliente in leer_clientes():
         if archivo not in nombres_validos:
             print(f"AVISO: decisions.csv de {carpeta} referencia un archivo que no existe entre las validadas: {archivo}")
 
-    # Panel CONCILIACIO -- solo lectura de disco. Piso 13X: una entrada
-    # manual (app.py, "Entrada manual") mai te arxiu original -- sense
-    # sumar-la aqui, presentes queda per sota de ok+pendents i el quadre
-    # "presentes == ok+pendents+errors" trenca amb un ⚠ fals per a un
-    # document que si es genuinament present (nomes que no escanejat).
-    presentes_gastos = len(listar_archivos_rebudes(origen_gastos))
-    presentes_gastos += sum(1 for _, d in gastos if d.get("origen") == "manual")
+    # Panel ENTRADES I CONCILIACIO -- solo lectura de disco. Piso 14:
+    # "presents" es desglossa en 3 fonts explícites (de lots, solts,
+    # manuals) en comptes de fondre les manuals en silenci dins
+    # "presents" (Piso 13X ho feia aixi nomes perque el quadre
+    # "presentes == ok+pendents+errors" no trenqués amb un ⚠ fals).
+    manifiestos_gastos = cargar_manifiestos(f"{carpeta_cliente}/rebudes/lotes_procesados")
+    manifiestos_ingressos = cargar_manifiestos(f"{carpeta_cliente}/apartados/lotes_vendes_procesados")
+    bases_lote_gastos = {os.path.splitext(n)[0] for n, _ in manifiestos_gastos}
+    bases_lote_ingressos = {os.path.splitext(n)[0] for n, _ in manifiestos_ingressos}
+
+    archivos_gastos = listar_archivos_rebudes(origen_gastos)
+    arxius_lots_gastos = contar_arxius_de_lots(manifiestos_gastos)
+    arxius_solts_gastos = sum(
+        1 for ruta in archivos_gastos if not es_arxiu_de_lot(os.path.basename(ruta), bases_lote_gastos)
+    )
+    manuals_gastos = sum(1 for _, d in gastos if d.get("origen") == "manual")
     extraidas_gastos = contar_json(f"{carpeta_cliente}/rebudes/extraidas")
     ok_gastos = sum(1 for _, d in gastos if d.get("estado") == "OK")
     pendents_gastos = len(gastos) - ok_gastos
 
-    presentes_ingressos = len([
+    archivos_ingressos = [
         f for f in os.listdir(origen_ingressos) if f.lower().endswith(EXTENSIONES_ORIGINAL)
-    ]) if os.path.isdir(origen_ingressos) else 0
-    presentes_ingressos += sum(1 for _, d in ingresos if d.get("origen") == "manual")
+    ] if os.path.isdir(origen_ingressos) else []
+    arxius_lots_ingressos = contar_arxius_de_lots(manifiestos_ingressos)
+    arxius_solts_ingressos = sum(
+        1 for nombre in archivos_ingressos if not es_arxiu_de_lot(nombre, bases_lote_ingressos)
+    )
+    manuals_ingressos = sum(1 for _, d in ingresos if d.get("origen") == "manual")
     extraidas_ingressos = contar_json(f"{carpeta_cliente}/apartados/ingressos_extraidas")
     ok_ingressos = sum(1 for _, d in ingresos if d.get("estado") == "OK")
     pendents_ingressos = len(ingresos) - ok_ingressos
@@ -1063,10 +1138,7 @@ for fila_cliente in leer_clientes():
         f for f in os.listdir(carpeta_albarans) if f.lower().endswith(EXTENSIONES_ORIGINAL)
     ]) if os.path.isdir(carpeta_albarans) else 0
 
-    manifiestos_conciliacio = (
-        cargar_manifiestos(f"{carpeta_cliente}/rebudes/lotes_procesados")
-        + cargar_manifiestos(f"{carpeta_cliente}/apartados/lotes_vendes_procesados")
-    )
+    manifiestos_conciliacio = manifiestos_gastos + manifiestos_ingressos
     n_ruido = sum(
         1 for _, documentos in manifiestos_conciliacio for doc in documentos if doc.get("tipo") == "ruido"
     )
@@ -1079,10 +1151,16 @@ for fila_cliente in leer_clientes():
     )
 
     panel_html = f"""
-    <h2>Conciliació</h2>
+    <h2>Entrades i Conciliació</h2>
     <div class="conciliacio">
-      {panel_conciliacio_flux("Despeses", presentes_gastos, extraidas_gastos, ok_gastos, pendents_gastos)}
-      {panel_conciliacio_flux("Ingressos", presentes_ingressos, extraidas_ingressos, ok_ingressos, pendents_ingressos)}
+      {panel_conciliacio_flux(
+          "Despeses", arxius_lots_gastos, arxius_solts_gastos, manuals_gastos,
+          extraidas_gastos, ok_gastos, pendents_gastos, detalle_lots(manifiestos_gastos),
+      )}
+      {panel_conciliacio_flux(
+          "Ingressos", arxius_lots_ingressos, arxius_solts_ingressos, manuals_ingressos,
+          extraidas_ingressos, ok_ingressos, pendents_ingressos, detalle_lots(manifiestos_ingressos),
+      )}
     </div>
     <p class="aparte">Informat a part (no entra en el quadre de dalt): {n_albarans} albarans apartats,
     {n_ruido} pàgines de soroll{" (sense dades de lots anteriors)" if not manifiestos_conciliacio else ""}.</p>

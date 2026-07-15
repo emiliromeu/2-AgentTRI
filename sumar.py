@@ -491,8 +491,14 @@ def verificar_enlaces_excel(ruta_xlsx, carpeta_cliente):
     verificados = 0
     trencats = []
     corruptes = []
+    manuals_sense_enllac = 0
     for ws in wb.worksheets:
         for row in ws.iter_rows():
+            # Piso 14: una fila d'ENTRADA MANUAL mai té original -- es
+            # compta a part, informatiu, MAI com a trencat (ja no arriba
+            # a comptar-se com a candidat: cell.hyperlink es sempre None).
+            if any(isinstance(c.value, str) and "ENTRADA MANUAL" in c.value for c in row):
+                manuals_sense_enllac += 1
             for cell in row:
                 if cell.hyperlink is None:
                     continue
@@ -504,7 +510,8 @@ def verificar_enlaces_excel(ruta_xlsx, carpeta_cliente):
                     corruptes.append(cell.hyperlink.target)
     print(
         f"{os.path.basename(carpeta_cliente)} / excel: {verificados} enllaços verificats, "
-        f"{len(trencats)} trencats, {len(corruptes)} corruptes"
+        f"{len(trencats)} trencats, {len(corruptes)} corruptes, "
+        f"{manuals_sense_enllac} manual sense enllaç"
     )
     for href in trencats:
         print(f"  TRENCAT: {href}")
@@ -513,11 +520,25 @@ def verificar_enlaces_excel(ruta_xlsx, carpeta_cliente):
 
 PATRON_SUM = re.compile(r"^=SUM\(([A-Z]+)(\d+):([A-Z]+)(\d+)\)$")
 PATRON_RESTA_SUM = re.compile(r"^=SUM\(([A-Z]+)(\d+):([A-Z]+)(\d+)\)-SUM\(([A-Z]+)(\d+):([A-Z]+)(\d+)\)$")
+# Piso 14: =SUM() amb una llista de cel·les concretes en comptes d'un
+# rang contigu -- veure _formula_suma_filas i el docstring nou de
+# escribir_detalle (les línies d'un cub ja no cauen sempre seguides).
+PATRON_SUM_MULTI = re.compile(r"^=SUM\(([A-Z]+\d+(?:,[A-Z]+\d+)*)\)$")
 
 
 def _leer_rango(ws, columna, ini, fin):
     total = 0.0
     for f in range(ini, fin + 1):
+        valor = ws[f"{columna}{f}"].value
+        total += valor or 0
+    return total
+
+
+def _leer_filas(ws, columna, filas):
+    """Piso 14: mateixa suma que _leer_rango pero per a una llista de
+    files concretes (no un rang contigu) -- veure PATRON_SUM_MULTI."""
+    total = 0.0
+    for f in filas:
         valor = ws[f"{columna}{f}"].value
         total += valor or 0
     return total
@@ -659,6 +680,19 @@ def verificar_formulas(ruta_xlsx, comprobaciones_por_hoja):
                         f"no coincideix amb l'anotat ({rango_esperado})"
                     )
                 valor_real = _leer_rango(ws, col_i, ini_i, fin_i) - _leer_rango(ws, col_g, ini_g, fin_g)
+            elif comprobacion[1] == "multi":
+                _, _, columna, filas, valor_esperado = comprobacion
+                m = PATRON_SUM_MULTI.match(str(formula))
+                if not m:
+                    raise ValueError(f"{nombre_hoja}!{coordenada}: fórmula inesperada: {formula!r}")
+                celdas_parseadas = m.group(1).split(",")
+                celdas_esperadas = [f"{columna}{f}" for f in filas]
+                if celdas_parseadas != celdas_esperadas:
+                    raise ValueError(
+                        f"{nombre_hoja}!{coordenada}: cel·les de la fórmula ({celdas_parseadas}) "
+                        f"no coincideixen amb les anotades ({celdas_esperadas})"
+                    )
+                valor_real = _leer_filas(ws, columna, filas)
             else:
                 _, columna, ini, fin, valor_esperado = comprobacion
                 m = PATRON_SUM.match(str(formula))
@@ -827,28 +861,45 @@ def escribir_bloque(ws, fila, titulo, sumas, con_retencion, etiqueta_retencion="
     return fila + 1, info  # una fila en blanco antes del siguiente bloque
 
 
+def _formula_suma_filas(columna, filas):
+    """Piso 14: =SUM() amb una llista de cel·les concretes (no un rang
+    contigu) -- sintaxi Excel vàlida (comes separen referències dins
+    d'un mateix SUM). Necessari des que escribir_detalle ja no ordena
+    per tipus primer: les línies d'un cub poden caure disperses entre
+    factures (cada una contigua per si mateixa, mai les unes amb les
+    altres)."""
+    return f"=SUM({','.join(f'{columna}{f}' for f in filas)})"
+
+
 def escribir_formulas_bloque(ws, info, rango_detalle, sumas, total_ok, retencion_ok):
     """Piso 12A: rellena con formulas =SUM() las celdas que escribir_bloque
     dejo en blanco, apuntando SOLO al rango de "FACTURES QUE SUMEN" de
     DETALL (rango_detalle, devuelto por escribir_detalle). Si un tipo no
     tiene ninguna linia que sume, se escribe 0 (no hay rango que sumar,
     no tiene sentido una formula). Devuelve la lista de comprobaciones
-    para verificar_formulas: (celda, columna, fila_ini, fila_fin, valor_esperado)."""
+    para verificar_formulas.
+
+    Piso 14: rango_detalle["tipos"][tipo] es ahora una LISTA de filas
+    exactas (pueden estar dispersas entre facturas, ya no un (ini, fin)
+    contiguo) -- comprobaciones para estas celdas llevan el
+    discriminador "multi" (filas, no ini/fin) en vez del formato viejo.
+    TOTAL/retención siguen sobre rango_detalle["bloque"], que SIGUE
+    siendo un rango contiguo (el bloque entero nunca se fragmenta,
+    solo los cubos por tipo dentro de el)."""
     comprobaciones = []
 
     for tipo, fila_tipo in info["filas_por_tipo"].items():
-        rango = rango_detalle["tipos"].get(tipo)
+        filas_tipo = rango_detalle["tipos"].get(tipo)
         celda_base = ws.cell(row=fila_tipo, column=2)
         celda_cuota = ws.cell(row=fila_tipo, column=3)
-        if rango is None:
+        if not filas_tipo:
             celda_base.value = 0
             celda_cuota.value = 0
             continue
-        ini, fin = rango
-        celda_base.value = f"=SUM({COLUMNA_BASE_DETALLE}{ini}:{COLUMNA_BASE_DETALLE}{fin})"
-        celda_cuota.value = f"=SUM({COLUMNA_QUOTA_DETALLE}{ini}:{COLUMNA_QUOTA_DETALLE}{fin})"
-        comprobaciones.append((celda_base.coordinate, COLUMNA_BASE_DETALLE, ini, fin, round(sumas[tipo]["base"], 2)))
-        comprobaciones.append((celda_cuota.coordinate, COLUMNA_QUOTA_DETALLE, ini, fin, round(sumas[tipo]["cuota"], 2)))
+        celda_base.value = _formula_suma_filas(COLUMNA_BASE_DETALLE, filas_tipo)
+        celda_cuota.value = _formula_suma_filas(COLUMNA_QUOTA_DETALLE, filas_tipo)
+        comprobaciones.append((celda_base.coordinate, "multi", COLUMNA_BASE_DETALLE, tuple(filas_tipo), round(sumas[tipo]["base"], 2)))
+        comprobaciones.append((celda_cuota.coordinate, "multi", COLUMNA_QUOTA_DETALLE, tuple(filas_tipo), round(sumas[tipo]["cuota"], 2)))
 
     rango_bloque = rango_detalle["bloque"]
     fila_total = info["fila_total"]
@@ -946,23 +997,21 @@ def escribir_formulas_resultat(ws, info, rango_g, rango_i, sumas_g, sumas_i):
     comprobaciones = []
 
     for tipo, fila_tipo in info["filas_por_tipo"].items():
-        rg = rango_g["tipos"].get(tipo)
+        filas_g = rango_g["tipos"].get(tipo)
         celda_g = ws.cell(row=fila_tipo, column=2)
-        if rg is None:
+        if not filas_g:
             celda_g.value = 0
         else:
-            ini, fin = rg
-            celda_g.value = f"=SUM({COLUMNA_QUOTA_DETALLE}{ini}:{COLUMNA_QUOTA_DETALLE}{fin})"
-            comprobaciones.append((celda_g.coordinate, COLUMNA_QUOTA_DETALLE, ini, fin, round(sumas_g[tipo]["cuota"], 2)))
+            celda_g.value = _formula_suma_filas(COLUMNA_QUOTA_DETALLE, filas_g)
+            comprobaciones.append((celda_g.coordinate, "multi", COLUMNA_QUOTA_DETALLE, tuple(filas_g), round(sumas_g[tipo]["cuota"], 2)))
 
-        ri = rango_i["tipos"].get(tipo)
+        filas_i = rango_i["tipos"].get(tipo)
         celda_i = ws.cell(row=fila_tipo, column=3)
-        if ri is None:
+        if not filas_i:
             celda_i.value = 0
         else:
-            ini, fin = ri
-            celda_i.value = f"=SUM({COLUMNA_QUOTA_DETALLE}{ini}:{COLUMNA_QUOTA_DETALLE}{fin})"
-            comprobaciones.append((celda_i.coordinate, COLUMNA_QUOTA_DETALLE, ini, fin, round(sumas_i[tipo]["cuota"], 2)))
+            celda_i.value = _formula_suma_filas(COLUMNA_QUOTA_DETALLE, filas_i)
+            comprobaciones.append((celda_i.coordinate, "multi", COLUMNA_QUOTA_DETALLE, tuple(filas_i), round(sumas_i[tipo]["cuota"], 2)))
 
     fila_resultat = info["fila_resultat"]
     celda_resultat = ws.cell(row=fila_resultat, column=3)
@@ -1035,11 +1084,13 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     es None, el color/estat se deriva de decision/estado (bloque
     FACTURES QUE SUMEN); si no, se usa tal cual (bloque PENDENTS,
     siempre taronja). nombres_ya_mostrados es un set compartido entre
-    llamadas de la MISMA escribir_detalle -- Retenció y Total son por
-    factura, no por linia d'IVA, asi que solo se muestran en la primera
-    linia escrita de cada factura: si una factura tiene mas de un tipus
-    d'IVA (mas de una linia), repetirlos en cada fila haria que el
-    =SUM() de la columna los contara dos veces."""
+    llamadas de la MISMA escribir_detalle -- Retenció, Total i TOTES les
+    altres columnes de nivell factura (Data/Núm/Contrapart/NIF/Estat) son
+    por factura, no por linia d'IVA, asi que solo se escriben en la
+    primera linia escrita de cada factura: escribir_detalle (Piso 14) les
+    fusiona verticalment despres amb un merge_cells -- escribir-les a
+    cada fila fundiria un valor per sobre d'un altre en el mateix merge.
+    Base/%IVA/Quota (columnes E/F/G) son per linia, sempre."""
     estado = datos.get("estado")
     ruta_original = encontrar_original(carpeta_original, nombre)
 
@@ -1100,15 +1151,6 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     if datos.get("total_normalitzat"):
         estado_mostrado += " | TOTAL NORMALITZAT"
 
-    celda_fecha(ws, fila, 1, datos.get("fecha_factura"))
-    celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
-    if ruta_original:
-        asignar_hipervinculo(celda_num, ruta_original)
-    # Piso 13K: contrapart (qui NO es el client, per NIF -- validar.py),
-    # no "proveedor" a seques -- a rebudes dona el mateix d'abans (el
-    # client hi es sempre receptor), a ingressos es la peça que fallava.
-    ws.cell(row=fila, column=3, value=datos.get("contrapart_nom"))
-    ws.cell(row=fila, column=4, value=datos.get("contrapart_nif"))
     celda_base = ws.cell(row=fila, column=5, value=linea.get("base"))
     celda_base.number_format = FORMATO_MONEDA
     celda_tipo = ws.cell(row=fila, column=6, value=linea.get("tipo_iva"))
@@ -1124,6 +1166,15 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     celda_liquid = ws.cell(row=fila, column=11)
     celda_liquid.number_format = FORMATO_MONEDA
     if nombre not in nombres_ya_mostrados:
+        celda_fecha(ws, fila, 1, datos.get("fecha_factura"))
+        celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
+        if ruta_original:
+            asignar_hipervinculo(celda_num, ruta_original)
+        # Piso 13K: contrapart (qui NO es el client, per NIF -- validar.py),
+        # no "proveedor" a seques -- a rebudes dona el mateix d'abans (el
+        # client hi es sempre receptor), a ingressos es la peça que fallava.
+        ws.cell(row=fila, column=3, value=datos.get("contrapart_nom"))
+        ws.cell(row=fila, column=4, value=datos.get("contrapart_nif"))
         celda_retencio_pct.value = datos.get("retencion_pct") or None
         celda_retencio.value = datos.get("retencion_cuota") or None
         total = datos.get("total") or 0
@@ -1132,28 +1183,75 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
         # retencio, Líquid = Total). Nomes informatiu, veure nota a
         # COLUMNAS_DETALLE -- cap suma d'aquest fitxer el fa servir.
         celda_liquid.value = total - (datos.get("retencion_cuota") or 0)
+        ws.cell(row=fila, column=12, value=estado_mostrado)
         nombres_ya_mostrados.add(nombre)
-    ws.cell(row=fila, column=12, value=estado_mostrado)
 
     for col in range(1, len(COLUMNAS_DETALLE) + 1):
         ws.cell(row=fila, column=col).fill = relleno
 
 
+# Piso 14: columnes de nivell factura (Data/Núm/Contrapart/NIF/%Ret/
+# Retenció/Total/Líquid/Estat) -- es fusionen verticalment quan una
+# factura te mes d'una línia d'IVA. Base/%IVA/Quota (5, 6, 7) en queden
+# fora a proposit: son per línia, mai es fusionen.
+COLUMNAS_NIVELL_FACTURA = (1, 2, 3, 4, 8, 9, 10, 11, 12)
+
+BORDE_GRUP_LATERAL = Side(style="thin")
+
+
+def fusionar_grup_factura(ws, fila_ini, fila_fin):
+    """Piso 14: fusiona verticalment les columnes de nivell factura d'un
+    grup de files que pertanyen a la MATEIXA factura -- es llegeix UNA
+    factura amb N línies i UN total, en lloc de N files que semblen N
+    factures. Sense efecte si fila_fin == fila_ini (una sola línia):
+    fusionar una cel·la amb ella mateixa no fa res."""
+    if fila_fin <= fila_ini:
+        return
+    for columna in COLUMNAS_NIVELL_FACTURA:
+        ws.merge_cells(start_row=fila_ini, end_row=fila_fin, start_column=columna, end_column=columna)
+
+
+def aplicar_vora_grup(ws, fila_ini, fila_fin, num_columnas):
+    """Piso 14: vora de caixa al voltant del grup sencer d'una factura
+    (totes les columnes, files fila_ini..fila_fin) -- delimita
+    visualment on comença i acaba cada factura, tingui una sola línia
+    d'IVA o vàries. Openpyxl no te un "border de rang": cada cel·la del
+    perímetre necessita el seu propi Border amb nomes els costats que li
+    toquen (les files interiors no en porten cap, perque el grup es
+    llegeixi com una sola caixa continua)."""
+    for f in range(fila_ini, fila_fin + 1):
+        for col in range(1, num_columnas + 1):
+            ws.cell(row=f, column=col).border = Border(
+                top=BORDE_GRUP_LATERAL if f == fila_ini else None,
+                bottom=BORDE_GRUP_LATERAL if f == fila_fin else None,
+                left=BORDE_GRUP_LATERAL if col == 1 else None,
+                right=BORDE_GRUP_LATERAL if col == num_columnas else None,
+            )
+
+
 def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_cliente, decisiones):
     """Piso 12A: DETALL en dos bloques -- "FACTURES QUE SUMEN" (las
     mismas que hoy cuentan en sumar_bloque: OK crudo o decision
-    aprovar, nunca descartades), agrupadas y ordenadas por tipus d'IVA
-    para que cada tipo ocupe un rango de filas seguido (imprescindible
-    para poder sumarlo luego con un =SUM() simple); y debajo "PENDENTS
-    -- NO SUMEN" (las REVISAR sin decision, en taronja, con el mismo
-    detalle de linias, para auditar sin que sumen). Las DESCARTADES ya
-    tienen su propio bloque (DESCARTATS, con nota/qui/data) y no se
-    repiten aqui.
+    aprovar, nunca descartades); y debajo "PENDENTS -- NO SUMEN" (las
+    REVISAR sin decision, en taronja, con el mismo detalle de linias,
+    para auditar sin que sumen). Las DESCARTADES ya tienen su propio
+    bloque (DESCARTATS, con nota/qui/data) y no se repiten aqui.
+
+    Piso 14: ordenado por FACTURA (data, 13O) -- las N linias de una
+    misma factura quedan SIEMPRE contiguas (fusionar_grup_factura las
+    fusiona verticalmente despues), aunque tengan tipos de IVA
+    distintos (el "cas rei": 10%+21% en la misma factura). Antes se
+    ordenaba por tipo primero para que cada cubo fuera un rango
+    contiguo -- ya no es asi: rango_tipos ahora es una LISTA de filas
+    exactas por tipo (pueden estar dispersas entre facturas),
+    escribir_formulas_bloque/escribir_formulas_resultat escriben
+    =SUM(fila1,fila2,...) en vez de =SUM(ini:fin).
 
     Devuelve (fila, rangos) -- rangos = {"bloque": (ini, fin) o None,
-    "tipos": {tipo: (ini, fin)}} con las filas EXACTAS de "FACTURES QUE
-    SUMEN", que escribir_formulas_bloque/escribir_formulas_resultat
-    necesitan para poder escribir sus =SUM()."""
+    "tipos": {tipo: [fila, fila, ...]}} con las filas EXACTAS de
+    "FACTURES QUE SUMEN", que escribir_formulas_bloque/
+    escribir_formulas_resultat necesitan para poder escribir sus
+    =SUM()."""
     facturas_suman = []
     facturas_pendientes = []
     for nombre, datos in facturas:
@@ -1186,48 +1284,32 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
         ws.cell(row=fila, column=col, value=texto).font = ESTILO_ENCABEZADO
     fila += 1
 
-    lineas_que_suman = []
-    for nombre, datos in facturas_suman:
-        for linea in (datos.get("lineas_iva") or [{}]):
-            tipo = linea.get("tipo_iva")
-            # Piso 13R: una fitxa exenta=true forma el seu propi cub
-            # "exenta", separat del tipus real de la línia -- mateixa
-            # classificació que sumar_bloque, imprescindible perque els
-            # rangs de files quadrin amb els =SUM() dels blocs.
-            if datos.get("exenta"):
-                clave_tipo = "exenta"
-            else:
-                clave_tipo = tipo if tipo in TIPOS_IVA else "otros"
-            lineas_que_suman.append((clave_tipo, nombre, datos, linea))
-
-    orden_tipo = {tipo: i for i, tipo in enumerate(TIPOS_IVA)}
-    orden_tipo["otros"] = len(TIPOS_IVA)
-    orden_tipo["exenta"] = len(TIPOS_IVA) + 1
-    # Piso 13R: ordre per data DINS de cada cub -- l'ordre per tipus es
-    # manté com a clau PRIMÀRIA (imprescindible pels rangs contigus que
-    # necessiten els =SUM() dels blocs), la data només desempata dins.
-    # Les fitxes sense fecha_factura cauen sempre al final del seu cub.
-    lineas_que_suman.sort(key=lambda x: (orden_tipo.get(x[0], 999), x[2].get("fecha_factura") or "9999-99-99"))
+    # Piso 13R/13O: ordre per data -- les fitxes sense fecha_factura
+    # cauen sempre al final. Piso 14: ja NO s'ordena per tipus primer --
+    # cada factura escriu les seves N línies seguides, tingui un o
+    # varis tipus d'IVA.
+    facturas_suman.sort(key=lambda nd: nd[1].get("fecha_factura") or "9999-99-99")
 
     nombres_ya_mostrados = set()
     rango_tipos = {}
-    fila_inicio_bloque = fila if lineas_que_suman else None
-    tipo_actual = None
-    fila_inicio_tipo = fila
-    for clave_tipo, nombre, datos, linea in lineas_que_suman:
-        if clave_tipo != tipo_actual:
-            if tipo_actual is not None:
-                rango_tipos[tipo_actual] = (fila_inicio_tipo, fila - 1)
-            tipo_actual = clave_tipo
-            fila_inicio_tipo = fila
+    fila_inicio_bloque = fila if facturas_suman else None
+    for nombre, datos in facturas_suman:
         decision = decisiones.get(nombre)
-        _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, carpeta_cliente, decision, nombres_ya_mostrados)
-        fila += 1
-    if tipo_actual is not None:
-        rango_tipos[tipo_actual] = (fila_inicio_tipo, fila - 1)
-    fila_fin_bloque = (fila - 1) if lineas_que_suman else None
+        fila_inicio_factura = fila
+        for linea in (datos.get("lineas_iva") or [{}]):
+            tipo = linea.get("tipo_iva")
+            # Piso 13R: una fitxa exenta=true forma el seu propi cub
+            # "exenta", separat del tipus real de la línia.
+            clave_tipo = "exenta" if datos.get("exenta") else (tipo if tipo in TIPOS_IVA else "otros")
+            rango_tipos.setdefault(clave_tipo, []).append(fila)
+            _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, carpeta_cliente, decision, nombres_ya_mostrados)
+            fila += 1
+        fila_fin_factura = fila - 1
+        fusionar_grup_factura(ws, fila_inicio_factura, fila_fin_factura)
+        aplicar_vora_grup(ws, fila_inicio_factura, fila_fin_factura, len(COLUMNAS_DETALLE))
+    fila_fin_bloque = (fila - 1) if facturas_suman else None
 
-    rangos = {"bloque": (fila_inicio_bloque, fila_fin_bloque) if lineas_que_suman else None, "tipos": rango_tipos}
+    rangos = {"bloque": (fila_inicio_bloque, fila_fin_bloque) if facturas_suman else None, "tipos": rango_tipos}
     fila += 1  # fila en blanco
 
     if facturas_pendientes:
@@ -1243,12 +1325,16 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
         fila += 1
         nombres_ya_mostrados_pendents = set()
         for nombre, datos in facturas_pendientes:
+            fila_inicio_factura = fila
             for linea in (datos.get("lineas_iva") or [{}]):
                 _escribir_fila_detalle(
                     ws, fila, nombre, datos, linea, carpeta_original, carpeta_cliente, None,
                     nombres_ya_mostrados_pendents, relleno_forzado=RELLENO_AVISO,
                 )
                 fila += 1
+            fila_fin_factura = fila - 1
+            fusionar_grup_factura(ws, fila_inicio_factura, fila_fin_factura)
+            aplicar_vora_grup(ws, fila_inicio_factura, fila_fin_factura, len(COLUMNAS_DETALLE))
 
     return fila + 1, rangos
 

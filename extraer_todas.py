@@ -232,6 +232,7 @@ Reglas:
 - observaciones es texto libre para anotar cualquier cosa rara en la factura.
 - proveedor = quien EMITE la factura (aparece en la cabecera/logo como emisor). receptor = a quien va dirigida (el destinatario). Esto es SIEMPRE así, incluso si el documento es una venta hecha por el propio cliente de esta gestoria (él sería el proveedor/emisor, su comprador el receptor). Nunca los intercambies aunque el documento sea una venta.
 - num_factura: el número COMPLETO de la factura, incluyendo cualquier serie o prefijo que aparezca (ej. si la factura indica "Serie A - 14" o "2026/A-14", el campo debe ser ese texto completo, no solo "14").
+- Si el documento parece contener MÁS DE UNA factura (varias facturas distintas escaneadas juntas en un solo archivo, cada una con su propio número/fecha/total), NO seleccione una sola: anota en observaciones exactamente "SEMBLA CONTENIR N FACTURES" (con N el número que veas), y extrae los datos de la PRIMERA factura tal cual para el resto de campos -- esto es solo una señal para que una persona decida reprocesar el archivo como lote, nunca inventes una fusión de las varias facturas en una.
 """
 
 
