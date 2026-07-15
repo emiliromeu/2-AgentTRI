@@ -471,7 +471,13 @@ for fila in todos_clientes:
                     retencion_cuota = datos.get("retencion_cuota") or 0
                     if retencion_cuota and abs(suma - retencion_cuota - total) <= TOLERANCIA:
                         total_brut = round(suma, 2)
-                        nota = f"total normalitzat: el paper duia el líquid {total} → {total_brut}"
+                        # Piso 14C: redacció mes explícita -- diu QUE es el
+                        # que imprimeix el paper i QUE es el que fan servir
+                        # els llibres, no nomes una fletxa entre dos numeros.
+                        nota = (
+                            f"total normalitzat: el paper imprimeix el líquid ({total}); "
+                            f"als llibres, total = base+IVA ({total_brut})"
+                        )
                         datos["observaciones"] = (
                             f"{datos['observaciones']} | {nota}" if datos.get("observaciones") else nota
                         )

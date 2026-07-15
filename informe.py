@@ -606,11 +606,12 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         if retencion_cuota else ""
     )
 
-    # Piso 13Y: Líquid = total - retencio (mai buit -- sense retencio,
-    # Líquid = Total). Nomes informatiu, mateix patró additiu que
-    # Retenció -- els cubs i el RESULTAT segueixen sobre base+quota.
+    # Piso 13Y/14C: TOTAL FRA. = total - retencio (mai buit -- sense
+    # retencio, TOTAL FRA. = Base + IVA). Nomes informatiu, mateix patró
+    # additiu que Retenció -- els cubs i el RESULTAT segueixen sobre
+    # base+quota, mai sobre aquesta xifra.
     liquid = (datos.get("total") or 0) - retencion_cuota
-    liquid_html = f"<p>Líquid: {esc(round(liquid, 2))} €</p>" if retencion_cuota else ""
+    liquid_html = f"<p>TOTAL FRA.: {esc(round(liquid, 2))} €</p>" if retencion_cuota else ""
 
     estado = datos.get("estado")
     motivos = [traducir_motivo(m) for m in (datos.get("motivos") or [])]
@@ -700,7 +701,7 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         <h3>{esc(datos.get("contrapart_nom"))}</h3>
         <p>NIF: {esc(datos.get("contrapart_nif"))} · Factura: {esc(datos.get("num_factura"))} · Data: {esc(datos.get("fecha_factura"))}</p>
         <ul class="lineas-iva">{lineas_html}</ul>
-        <p>Total: {esc(datos.get("total"))} €</p>
+        <p>Base + IVA: {esc(datos.get("total"))} €</p>
         {liquid_html}
         {retencion_html}
         <p class="archivo">{esc(nombre)}</p>

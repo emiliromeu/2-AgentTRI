@@ -1886,9 +1886,15 @@ def tarjeta_revisio(nombre, datos, origen, carpeta_cliente, qui, prefijo, flujo,
             )
             for linea in datos.get("lineas_iva") or []:
                 st.write(f"Base {linea.get('base')} € × {linea.get('tipo_iva')}% = {linea.get('cuota')} €")
-            st.write(f"Total: {datos.get('total')} €")
+            st.write(f"Base + IVA: {datos.get('total')} €")
             if datos.get("retencion_cuota"):
                 st.write(f"Retenció: {datos.get('retencion_pct')}% = {datos.get('retencion_cuota')} €")
+                # Piso 14C: TOTAL FRA. = Base+IVA - retenció -- mateix
+                # patró additiu que informe.py, nomes quan hi ha
+                # retenció (sense retenció, TOTAL FRA. seria idèntic a
+                # Base + IVA, ja mostrat a sobre, sense afegir res nou).
+                total_fra = (datos.get("total") or 0) - datos.get("retencion_cuota")
+                st.write(f"TOTAL FRA.: {round(total_fra, 2)} €")
             motivos = [traducir_motivo(m) for m in (datos.get("motivos") or [])]
             if motivos:
                 st.warning("\n".join(f"- {m}" for m in motivos))

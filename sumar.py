@@ -762,10 +762,12 @@ def sumar_bloque(facturas, decisiones):
     siempre (ninguna entrada tiene decision).
 
     Piso 13R: las fichas exenta=true forman su propio cubo "exenta"
-    (solo base, la cuota de una exenta coherente siempre es 0 -- lo
-    garantiza la validacion nueva de validar.py antes de que la ficha
-    pueda llegar a OK/aprovar) -- separado del cubo del tipo 0% real,
-    que sigue significando exactamente lo mismo que antes.
+    -- separado del cubo del tipo 0% real, que sigue significando
+    exactamente lo mismo que antes. La cuota de una exenta coherente
+    es siempre 0 (lo garantiza validar.py antes de OK); Piso 14C:
+    una línia exempta APROVADA manualment tot i ser incoherent pot
+    portar quota real distinta de 0 -- ja no s'amaga (es suma i
+    s'escriu igual que qualsevol altre tipus).
 
     Piso 14B: exenta es un campo POR LÍNIA (validar.py ja el resol i
     deriva el de factura) -- una factura mixta (una línia exempta,
@@ -853,6 +855,7 @@ def escribir_bloque(ws, fila, titulo, sumas, con_retencion, etiqueta_retencion="
     fila += 1
 
     fila_retencio = None
+    fila_total_fra = None
     if con_retencion:
         for col in range(1, 5):
             ws.cell(row=fila, column=col).border = BORDE_SUPERIOR
@@ -863,7 +866,20 @@ def escribir_bloque(ws, fila, titulo, sumas, con_retencion, etiqueta_retencion="
         fila_retencio = fila
         fila += 1
 
-    info = {"filas_por_tipo": filas_por_tipo, "fila_total": fila_total, "fila_retencio": fila_retencio}
+        # Piso 14C: "Σ TOTAL FRA." AL COSTAT de "TOTAL" (mai en lloc
+        # seu) -- el seu llibre defineix TOTAL FRA. = base+IVA-retenció,
+        # les dues xifres (bruta i neta) es queden sempre visibles.
+        ws.cell(row=fila, column=1, value="Σ TOTAL FRA.").font = ESTILO_ENCABEZADO
+        celda_total_fra = ws.cell(row=fila, column=4)
+        celda_total_fra.font = ESTILO_ENCABEZADO
+        celda_total_fra.number_format = FORMATO_MONEDA
+        fila_total_fra = fila
+        fila += 1
+
+    info = {
+        "filas_por_tipo": filas_por_tipo, "fila_total": fila_total,
+        "fila_retencio": fila_retencio, "fila_total_fra": fila_total_fra,
+    }
     return fila + 1, info  # una fila en blanco antes del siguiente bloque
 
 
@@ -900,18 +916,18 @@ def escribir_formulas_bloque(ws, info, rango_detalle, sumas, total_ok, retencion
         celda_cuota = ws.cell(row=fila_tipo, column=3)
         if not filas_tipo:
             celda_base.value = 0
-            # Piso 14B: el cub Exempta mai porta un 0,00 de quota
-            # enganyós -- es queda buit (la quota d'una línia exempta
-            # coherent és sempre 0 per construcció, validar.py ho
-            # garanteix; no cal ni fórmula ni verificar-la).
-            if tipo != "exenta":
-                celda_cuota.value = 0
+            celda_cuota.value = 0
             continue
         celda_base.value = _formula_suma_filas(COLUMNA_BASE_DETALLE, filas_tipo)
         comprobaciones.append((celda_base.coordinate, "multi", COLUMNA_BASE_DETALLE, tuple(filas_tipo), round(sumas[tipo]["base"], 2)))
-        if tipo != "exenta":
-            celda_cuota.value = _formula_suma_filas(COLUMNA_QUOTA_DETALLE, filas_tipo)
-            comprobaciones.append((celda_cuota.coordinate, "multi", COLUMNA_QUOTA_DETALLE, tuple(filas_tipo), round(sumas[tipo]["cuota"], 2)))
+        # Piso 14C: la quota Exempta ja no es queda buida per
+        # construcció -- una línia exempta APROVADA manualment tot i
+        # ser incoherent (tipus/quota diferents de 0) pot portar una
+        # quota real distinta de 0, i s'ha de veure (RESULTAT, a
+        # escribir_formulas_resultat, ja la sumava be des de sempre;
+        # nomes aquest cub la deixava invisible).
+        celda_cuota.value = _formula_suma_filas(COLUMNA_QUOTA_DETALLE, filas_tipo)
+        comprobaciones.append((celda_cuota.coordinate, "multi", COLUMNA_QUOTA_DETALLE, tuple(filas_tipo), round(sumas[tipo]["cuota"], 2)))
 
     rango_bloque = rango_detalle["bloque"]
     fila_total = info["fila_total"]
@@ -941,6 +957,21 @@ def escribir_formulas_bloque(ws, info, rango_detalle, sumas, total_ok, retencion
             ini, fin = rango_bloque
             celda_retencio.value = f"=SUM({COLUMNA_RETENCIO_DETALLE}{ini}:{COLUMNA_RETENCIO_DETALLE}{fin})"
             comprobaciones.append((celda_retencio.coordinate, COLUMNA_RETENCIO_DETALLE, ini, fin, round(retencion_ok, 2)))
+
+    # Piso 14C: "Σ TOTAL FRA." -- mateix patró exacte que TOTAL/
+    # retenció (rang contigu sobre rango_bloque, mai fragmentat), sumant
+    # la columna TOTAL FRA. (cada factura nomes hi escriu a la primera
+    # línia, com Total/Retenció -- una fila en blanc suma 0).
+    if info["fila_total_fra"] is not None:
+        celda_total_fra = ws.cell(row=info["fila_total_fra"], column=4)
+        if rango_bloque is None:
+            celda_total_fra.value = 0
+        else:
+            ini, fin = rango_bloque
+            celda_total_fra.value = f"=SUM({COLUMNA_LIQUID_DETALLE}{ini}:{COLUMNA_LIQUID_DETALLE}{fin})"
+            comprobaciones.append((
+                celda_total_fra.coordinate, COLUMNA_LIQUID_DETALLE, ini, fin, round(total_ok - retencion_ok, 2),
+            ))
 
     return comprobaciones
 
@@ -993,6 +1024,16 @@ def escribir_resultat_estructura(ws, fila, sumas_g, sumas_i):
         "(resultat de treball, no liquidació oficial)"
     )
     ws.cell(row=fila, column=1, value=nota).font = FUENTE_NOTA
+    fila += 1
+
+    # Piso 14C: nota de doctrina -- perquè ningú confongui TOTAL FRA.
+    # (la xifra que fa servir el llibre de la gestoria) amb la base
+    # del 303 (que es calcula sempre amb les quotes, mai amb aquesta
+    # columna).
+    nota_total_fra = (
+        "TOTAL FRA. = base + IVA − IRPF (com al llibre); el 303 es calcula amb les quotes."
+    )
+    ws.cell(row=fila, column=1, value=nota_total_fra).font = FUENTE_NOTA
     fila += 1
 
     info = {"filas_por_tipo": filas_por_tipo, "fila_resultat": fila_resultat}
@@ -1050,24 +1091,26 @@ def escribir_formulas_resultat(ws, info, rango_g, rango_i, sumas_g, sumas_i):
 
 
 # Piso 13S: "% Ret." nova, "Retenció" renombrada "Retenció (€)" per
-# claredat -- desplaça Total (H->I->J) i Estat (I->J->K, literal a
-# _escribir_fila_detalle). Totes les fórmules =SUM() referencien
-# NOMÉS via aquestes constants, mai un literal cru -- canvi mecànic.
-# Piso 13Y: "Líquid (€)" es NOMES informatiu (total - retencio, o el
-# total si no n'hi ha) -- els cubs per tipus d'IVA, el RESULTAT i tota
-# la resta de matematica fiscal segueixen SEMPRE sobre base+quota,
-# mai sobre aquesta columna. Insercio segura: va DESPRES de "Total"
-# (columna J, COLUMNA_TOTAL_DETALLE, que no es mou) i abans d'"Estat",
-# que per aixo passa de columna 11 a 12 mes avall.
+# claredat. Totes les fórmules =SUM() referencien NOMÉS via aquestes
+# constants, mai un literal cru -- canvi mecànic.
+# Piso 13Y: Líquid (avui "TOTAL FRA.") es NOMES informatiu (total -
+# retencio, o el total si no n'hi ha) -- els cubs per tipus d'IVA, el
+# RESULTAT i tota la resta de matematica fiscal segueixen SEMPRE sobre
+# base+quota, mai sobre aquesta columna.
+# Piso 14C: columnes en l'idioma del llibre de la gestoria -- "Total"
+# (brut) es renombra "Base + IVA (€)" i es mou ABANS de %Ret/Retenció
+# (es llegeix d'esquerra a dreta com el llibre: brut, retenció, net);
+# "Líquid (€)" es renombra "TOTAL FRA. (€)" (el seu llibre defineix
+# TOTAL FRA. = base+IVA-retenció) i es queda últim abans d'Estat.
 COLUMNAS_DETALLE = [
     "Data", "Núm. factura", "Proveïdor", "NIF", "Base", "%IVA", "Quota",
-    "% Ret.", "Retenció (€)", "Total", "Líquid (€)", "Estat",
+    "Base + IVA (€)", "% Ret.", "Retenció (€)", "TOTAL FRA. (€)", "Estat",
 ]
 COLUMNA_BASE_DETALLE = "E"
 COLUMNA_QUOTA_DETALLE = "G"
-COLUMNA_RETENCIO_PCT_DETALLE = "H"
-COLUMNA_RETENCIO_DETALLE = "I"
-COLUMNA_TOTAL_DETALLE = "J"
+COLUMNA_TOTAL_DETALLE = "H"
+COLUMNA_RETENCIO_PCT_DETALLE = "I"
+COLUMNA_RETENCIO_DETALLE = "J"
 COLUMNA_LIQUID_DETALLE = "K"
 
 
@@ -1169,12 +1212,14 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     celda_tipo.number_format = FORMATO_PORCENTAJE
     celda_cuota = ws.cell(row=fila, column=7, value=linea.get("cuota"))
     celda_cuota.number_format = FORMATO_MONEDA
-    celda_retencio_pct = ws.cell(row=fila, column=8)
-    celda_retencio_pct.number_format = FORMATO_PORCENTAJE
-    celda_retencio = ws.cell(row=fila, column=9)
-    celda_retencio.number_format = FORMATO_MONEDA
-    celda_total = ws.cell(row=fila, column=10)
+    # Piso 14C: ordre nou -- Base+IVA (brut) ABANS de %Ret/Retenció,
+    # llegit d'esquerra a dreta com el llibre (brut, retenció, net).
+    celda_total = ws.cell(row=fila, column=8)
     celda_total.number_format = FORMATO_MONEDA
+    celda_retencio_pct = ws.cell(row=fila, column=9)
+    celda_retencio_pct.number_format = FORMATO_PORCENTAJE
+    celda_retencio = ws.cell(row=fila, column=10)
+    celda_retencio.number_format = FORMATO_MONEDA
     celda_liquid = ws.cell(row=fila, column=11)
     celda_liquid.number_format = FORMATO_MONEDA
     if nombre not in nombres_ya_mostrados:
@@ -1187,13 +1232,13 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
         # client hi es sempre receptor), a ingressos es la peça que fallava.
         ws.cell(row=fila, column=3, value=datos.get("contrapart_nom"))
         ws.cell(row=fila, column=4, value=datos.get("contrapart_nif"))
-        celda_retencio_pct.value = datos.get("retencion_pct") or None
-        celda_retencio.value = datos.get("retencion_cuota") or None
         total = datos.get("total") or 0
         celda_total.value = datos.get("total")
-        # Piso 13Y: Líquid = total - retencio (mai buit -- sense
-        # retencio, Líquid = Total). Nomes informatiu, veure nota a
-        # COLUMNAS_DETALLE -- cap suma d'aquest fitxer el fa servir.
+        celda_retencio_pct.value = datos.get("retencion_pct") or None
+        celda_retencio.value = datos.get("retencion_cuota") or None
+        # Piso 13Y/14C: TOTAL FRA. = total - retencio (mai buit -- sense
+        # retencio, TOTAL FRA. = Base + IVA). Nomes informatiu, veure
+        # nota a COLUMNAS_DETALLE -- cap suma d'aquest fitxer el fa servir.
         celda_liquid.value = total - (datos.get("retencion_cuota") or 0)
         ws.cell(row=fila, column=12, value=estado_mostrado)
         nombres_ya_mostrados.add(nombre)
@@ -1202,8 +1247,8 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
         ws.cell(row=fila, column=col).fill = relleno
 
 
-# Piso 14: columnes de nivell factura (Data/Núm/Contrapart/NIF/%Ret/
-# Retenció/Total/Líquid/Estat) -- es fusionen verticalment quan una
+# Piso 14: columnes de nivell factura (Data/Núm/Contrapart/NIF/Base+IVA/
+# %Ret/Retenció/TOTAL FRA./Estat) -- es fusionen verticalment quan una
 # factura te mes d'una línia d'IVA. Base/%IVA/Quota (5, 6, 7) en queden
 # fora a proposit: son per línia, mai es fusionen.
 COLUMNAS_NIVELL_FACTURA = (1, 2, 3, 4, 8, 9, 10, 11, 12)
@@ -1703,8 +1748,8 @@ for fila_cliente in leer_clientes():
         ws.column_dimensions["E"].width = 14
         ws.column_dimensions["F"].width = 10
         ws.column_dimensions["G"].width = 14
-        ws.column_dimensions["H"].width = 10
-        ws.column_dimensions["I"].width = 14
+        ws.column_dimensions["H"].width = 14
+        ws.column_dimensions["I"].width = 10
         ws.column_dimensions["J"].width = 14
         ws.column_dimensions["K"].width = 14
         ws.column_dimensions["L"].width = 12
