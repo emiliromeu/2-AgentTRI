@@ -400,7 +400,24 @@ for fila in todos_clientes:
             if total is not None:
                 suma = sum((l.get("base") or 0) + (l.get("cuota") or 0) for l in lineas)
                 if abs(suma - total) > TOLERANCIA:
-                    motivos.append(f"total no cuadra: bases+cuotas={suma:.2f}, total indica {total}")
+                    # Piso 13Y: alguns papers (lloguers, professionals,
+                    # agràries) imprimeixen com a TOTAL el líquid --
+                    # el brut ja amb la retenció restada. Abans de
+                    # marcar motiu es prova aquesta segona identitat;
+                    # si només quadra pel net, es normalitza el total
+                    # al brut (el que la resta de la màquina espera
+                    # sempre) i queda constància -- mai en silenci.
+                    retencion_cuota = datos.get("retencion_cuota") or 0
+                    if retencion_cuota and abs(suma - retencion_cuota - total) <= TOLERANCIA:
+                        total_brut = round(suma, 2)
+                        nota = f"total normalitzat: el paper duia el líquid {total} → {total_brut}"
+                        datos["observaciones"] = (
+                            f"{datos['observaciones']} | {nota}" if datos.get("observaciones") else nota
+                        )
+                        datos["total"] = total_brut
+                        datos["total_normalitzat"] = True
+                    else:
+                        motivos.append(f"total no cuadra: bases+cuotas={suma:.2f}, total indica {total}")
 
             # En rebudes el cliente SIEMPRE es el receptor (factura de compra).
             # En ingressos puede ser receptor (liquidacion de cooperativa) o

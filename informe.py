@@ -279,6 +279,12 @@ def cargar_decisiones(carpeta_cliente):
     return decisiones
 
 
+def estat_efectiu(decision):
+    """Piso 13Y: igual que en sumar.py -- 'aprovar', 'descartar', o None
+    a partir d'una decisio ja obtinguda de cargar_decisiones()."""
+    return decision.get("accion") if decision else None
+
+
 def historial_decisiones(carpeta_cliente, archivo):
     """Piso 13M: igual que en sumar.py/app.py."""
     ruta = f"{carpeta_cliente}/decisions.csv"
@@ -426,11 +432,11 @@ def sumar_bloque(facturas, decisiones):
     for nombre, datos in facturas:
         decision = decisiones.get(nombre)
 
-        if decision and decision.get("accion") == "descartar":
+        if estat_efectiu(decision) == "descartar":
             descartados.append((nombre, datos, decision))
             continue
 
-        cuenta = datos.get("estado") == "OK" or (decision and decision.get("accion") == "aprovar")
+        cuenta = datos.get("estado") == "OK" or estat_efectiu(decision) == "aprovar"
         if not cuenta:
             revisar.append((nombre, datos))
             continue
@@ -554,6 +560,12 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         if retencion_cuota else ""
     )
 
+    # Piso 13Y: Líquid = total - retencio (mai buit -- sense retencio,
+    # Líquid = Total). Nomes informatiu, mateix patró additiu que
+    # Retenció -- els cubs i el RESULTAT segueixen sobre base+quota.
+    liquid = (datos.get("total") or 0) - retencion_cuota
+    liquid_html = f"<p>Líquid: {esc(round(liquid, 2))} €</p>" if retencion_cuota else ""
+
     estado = datos.get("estado")
     motivos = [traducir_motivo(m) for m in (datos.get("motivos") or [])]
     motivos_html = (
@@ -566,7 +578,7 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         f"<p><strong>Observacions de lectura:</strong> {esc(observaciones)}</p>" if observaciones else ""
     )
 
-    accion_decision = decision.get("accion") if decision else None
+    accion_decision = estat_efectiu(decision)
     clase_estado = "ok" if (estado != "REVISAR" or accion_decision == "aprovar") else "revisar"
 
     es_abonament = (datos.get("total") or 0) < 0
@@ -619,6 +631,14 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         if resumen_historial else ""
     )
 
+    # Piso 13Y: mateix patró additiu que corregit_html -- validar.py ha
+    # normalitzat el total (el paper duia el líquid, no el brut); la
+    # nota amb les dues xifres ja viu a observaciones_html.
+    normalitzat_html = (
+        '<span class="etiqueta-decisio normalitzat">⇄ Total normalitzat</span>'
+        if datos.get("total_normalitzat") else ""
+    )
+
     return f"""
     <div class="tarjeta {clase_estado}">
       <div class="tarjeta-izq">
@@ -630,10 +650,12 @@ def tarjeta_factura(nombre, datos, tipo_bloque, carpeta_original, carpeta_client
         {manual_html}
         {decisio_html}
         {corregit_html}
+        {normalitzat_html}
         <h3>{esc(datos.get("contrapart_nom"))}</h3>
         <p>NIF: {esc(datos.get("contrapart_nif"))} · Factura: {esc(datos.get("num_factura"))} · Data: {esc(datos.get("fecha_factura"))}</p>
         <ul class="lineas-iva">{lineas_html}</ul>
         <p>Total: {esc(datos.get("total"))} €</p>
+        {liquid_html}
         {retencion_html}
         <p class="archivo">{esc(nombre)}</p>
         {motivos_html}
@@ -947,6 +969,7 @@ p.resultat-iva .nota { font-size: 0.8rem; font-style: italic; color: #555; }
 .etiqueta-decisio.aprovat { background: #E2EFDA; color: #375623; }
 .etiqueta-decisio.corregit { background: #D9E8F5; color: #0D3D6B; }
 .etiqueta-decisio.manual { background: #FFF2CC; color: #7F6000; }
+.etiqueta-decisio.normalitzat { background: #DDEBF7; color: #1F4E78; }
 .lineas-iva { margin: 0.3rem 0; padding-left: 1.2rem; }
 .archivo { font-family: monospace; font-size: 0.8rem; color: #555; }
 .nota-decisio { font-style: italic; }
@@ -977,6 +1000,7 @@ table.errors tbody tr { background: #FFC7CE; }
   .etiqueta-decisio.aprovat { background: #22331f; color: #b7d7a8; }
   .etiqueta-decisio.corregit { background: #1a2e42; color: #a9cdf0; }
   .etiqueta-decisio.manual { background: #3a3319; color: #e0c97a; }
+  .etiqueta-decisio.normalitzat { background: #1a2e42; color: #9cc3e8; }
   table.errors tbody tr { background: #4a2323; }
   table.descartats tbody tr { background: #333; }
   .archivo { color: #aaa; }

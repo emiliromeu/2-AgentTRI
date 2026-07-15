@@ -523,7 +523,7 @@ def candidatos_destruccio(carpeta):
     for flujo, carpeta_validadas, carpeta_extraidas, carpeta_origen in flujos:
         for nombre, datos in cargar_validadas(carpeta_validadas):
             decision = decisiones.get(nombre)
-            if not (decision and decision.get("accion") == "descartar"):
+            if estat_efectiu(decision) != "descartar":
                 continue
             rutas = []
             ruta_original = encontrar_original(carpeta_origen, nombre)
@@ -1258,6 +1258,13 @@ def cargar_decisiones(carpeta_cliente):
             else:
                 decisiones[archivo] = fila
     return decisiones
+
+
+def estat_efectiu(decision):
+    """Piso 13Y: igual que en sumar.py/informe.py -- 'aprovar',
+    'descartar', o None a partir d'una decisio ja obtinguda de
+    cargar_decisiones()."""
+    return decision.get("accion") if decision else None
 
 
 def historial_decisiones(carpeta_cliente, archivo):

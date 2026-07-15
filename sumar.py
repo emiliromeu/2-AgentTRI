@@ -331,6 +331,15 @@ def cargar_decisiones(carpeta_cliente):
     return decisiones
 
 
+def estat_efectiu(decision):
+    """Piso 13Y: 'aprovar', 'descartar', o None -- la interpretacio
+    d'una decisio ja obtinguda de cargar_decisiones().get(archivo). Es
+    exactament l'expressio que es repetia a sumar_bloque,
+    escribir_detalle i _escribir_fila_detalle -- cap canvi de gramatica,
+    nomes un sol lloc si mai cal canviar-la."""
+    return decision.get("accion") if decision else None
+
+
 def historial_decisiones(carpeta_cliente, archivo):
     """Piso 13M: igual que en app.py -- totes les files d'aquest
     archiu a decisions.csv, en ordre cronologic."""
@@ -730,11 +739,11 @@ def sumar_bloque(facturas, decisiones):
     for nombre, datos in facturas:
         decision = decisiones.get(nombre)
 
-        if decision and decision.get("accion") == "descartar":
+        if estat_efectiu(decision) == "descartar":
             descartados.append((nombre, datos, decision))
             continue
 
-        cuenta = datos.get("estado") == "OK" or (decision and decision.get("accion") == "aprovar")
+        cuenta = datos.get("estado") == "OK" or estat_efectiu(decision) == "aprovar"
         if not cuenta:
             revisar.append((nombre, datos))
             continue
@@ -981,12 +990,22 @@ def escribir_formulas_resultat(ws, info, rango_g, rango_i, sumas_g, sumas_i):
 # claredat -- desplaça Total (H->I->J) i Estat (I->J->K, literal a
 # _escribir_fila_detalle). Totes les fórmules =SUM() referencien
 # NOMÉS via aquestes constants, mai un literal cru -- canvi mecànic.
-COLUMNAS_DETALLE = ["Data", "Núm. factura", "Proveïdor", "NIF", "Base", "%IVA", "Quota", "% Ret.", "Retenció (€)", "Total", "Estat"]
+# Piso 13Y: "Líquid (€)" es NOMES informatiu (total - retencio, o el
+# total si no n'hi ha) -- els cubs per tipus d'IVA, el RESULTAT i tota
+# la resta de matematica fiscal segueixen SEMPRE sobre base+quota,
+# mai sobre aquesta columna. Insercio segura: va DESPRES de "Total"
+# (columna J, COLUMNA_TOTAL_DETALLE, que no es mou) i abans d'"Estat",
+# que per aixo passa de columna 11 a 12 mes avall.
+COLUMNAS_DETALLE = [
+    "Data", "Núm. factura", "Proveïdor", "NIF", "Base", "%IVA", "Quota",
+    "% Ret.", "Retenció (€)", "Total", "Líquid (€)", "Estat",
+]
 COLUMNA_BASE_DETALLE = "E"
 COLUMNA_QUOTA_DETALLE = "G"
 COLUMNA_RETENCIO_PCT_DETALLE = "H"
 COLUMNA_RETENCIO_DETALLE = "I"
 COLUMNA_TOTAL_DETALLE = "J"
+COLUMNA_LIQUID_DETALLE = "K"
 
 
 def celda_fecha(ws, fila, columna, fecha_iso):
@@ -1032,10 +1051,10 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     if relleno_forzado is not None:
         estado_mostrado = estado
         relleno = relleno_forzado
-    elif decision and decision.get("accion") == "descartar":
+    elif estat_efectiu(decision) == "descartar":
         estado_mostrado = f"DESCARTAT ({decision.get('nota', '')})"
         relleno = RELLENO_DESCARTAT
-    elif decision and decision.get("accion") == "aprovar":
+    elif estat_efectiu(decision) == "aprovar":
         estado_mostrado = f"OK (aprovat manualment per {decision.get('qui', '')}, {decision.get('data', '')})"
         relleno = RELLENO_OK
     else:
@@ -1073,6 +1092,12 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     if datos.get("origen") == "manual":
         estado_mostrado += " | ENTRADA MANUAL"
 
+    # Piso 13Y: mateix patró additiu -- validar.py ha normalitzat el
+    # total (el paper duia el líquid, no el brut). El total ja es el
+    # brut aquí; la nota amb les dues xifres viu a observaciones.
+    if datos.get("total_normalitzat"):
+        estado_mostrado += " | TOTAL NORMALITZAT"
+
     celda_fecha(ws, fila, 1, datos.get("fecha_factura"))
     celda_num = ws.cell(row=fila, column=2, value=datos.get("num_factura"))
     if ruta_original:
@@ -1094,12 +1119,19 @@ def _escribir_fila_detalle(ws, fila, nombre, datos, linea, carpeta_original, car
     celda_retencio.number_format = FORMATO_MONEDA
     celda_total = ws.cell(row=fila, column=10)
     celda_total.number_format = FORMATO_MONEDA
+    celda_liquid = ws.cell(row=fila, column=11)
+    celda_liquid.number_format = FORMATO_MONEDA
     if nombre not in nombres_ya_mostrados:
         celda_retencio_pct.value = datos.get("retencion_pct") or None
         celda_retencio.value = datos.get("retencion_cuota") or None
+        total = datos.get("total") or 0
         celda_total.value = datos.get("total")
+        # Piso 13Y: Líquid = total - retencio (mai buit -- sense
+        # retencio, Líquid = Total). Nomes informatiu, veure nota a
+        # COLUMNAS_DETALLE -- cap suma d'aquest fitxer el fa servir.
+        celda_liquid.value = total - (datos.get("retencion_cuota") or 0)
         nombres_ya_mostrados.add(nombre)
-    ws.cell(row=fila, column=11, value=estado_mostrado)
+    ws.cell(row=fila, column=12, value=estado_mostrado)
 
     for col in range(1, len(COLUMNAS_DETALLE) + 1):
         ws.cell(row=fila, column=col).fill = relleno
@@ -1124,9 +1156,9 @@ def escribir_detalle(ws, fila, titulo, facturas, carpeta_original, carpeta_clien
     facturas_pendientes = []
     for nombre, datos in facturas:
         decision = decisiones.get(nombre)
-        if decision and decision.get("accion") == "descartar":
+        if estat_efectiu(decision) == "descartar":
             continue
-        cuenta = datos.get("estado") == "OK" or (decision and decision.get("accion") == "aprovar")
+        cuenta = datos.get("estado") == "OK" or estat_efectiu(decision) == "aprovar"
         if cuenta:
             facturas_suman.append((nombre, datos))
         else:
@@ -1574,7 +1606,8 @@ for fila_cliente in leer_clientes():
         ws.column_dimensions["H"].width = 10
         ws.column_dimensions["I"].width = 14
         ws.column_dimensions["J"].width = 14
-        ws.column_dimensions["K"].width = 12
+        ws.column_dimensions["K"].width = 14
+        ws.column_dimensions["L"].width = 12
 
         fila = escribir_titulo(ws, fila_cliente["nombre"], fila_cliente["nif"])
         pendientes = []

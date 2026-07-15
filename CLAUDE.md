@@ -35,3 +35,9 @@ docs/esquema_canonico_v1.md — leerlo antes de tocar código.
     piden de forma bloqueante antes de mostrar acciones, o el clic
     produce un error visible. Nunca depender de que un text_input de
     Streamlit esté confirmado con Tab/Enter.
+11. Ningún piso toca sumar.py sin pasar antes
+    `python3 verificar_conservacio.py` contra los 4 clientes reales
+    (0 divergencias) — bateria independiente (Piso 13Y) que recalcula
+    los cubos por tipo de IVA, Total, Líquid y RESULTAT desde
+    validadas/*.json + decisions.csv sin importar sumar.py, y los
+    compara célula a célula contra el Excel generado.
