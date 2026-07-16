@@ -987,14 +987,16 @@ def descriure_estat_gemelo(estat, info):
 def executar_reactivacio(reactivable, qui):
     """Piso 14D: desfà la mort del gemelo, sempre amb fila nova al
     llibre corresponent (mai esborrar -- filosofia 13M/13N):
-    - retirat: shutil.move d'errors_retirats/ cap a l'entrada del flux
-      que s'estava pujant + fila "reactivat" a registre.csv (la data
-      nova fa que contar_retirs_sense_recalcular encengui sol el
-      semàfor, que és exactament el que toca).
+    - retirat: shutil.move d'errors_retirats/ cap a l'ORIGEN registrat
+      (Piso 14E: la columna "origen" de registre.csv sap d'on va
+      sortir; si la fila és d'abans i no en porta, el destí de la
+      pujada actual com a reserva) + fila "reactivat" nova (la data fa
+      que contar_retirs_sense_recalcular encengui sol el semàfor).
     - descartat: revertir_decision (el mecanisme EXACTE del 13M -- fila
       "revertir" nova a decisions.csv, la fitxa torna a comptar segons
       el seu estado de sempre).
-    Retorna el missatge d'èxit per ensenyar."""
+    Retorna (resultat, missatge) -- resultat None si no hi havia res a
+    fer."""
     carpeta_cliente = reactivable["carpeta_cliente"]
     nombre = reactivable["nombre"]
 
@@ -1002,7 +1004,11 @@ def executar_reactivacio(reactivable, qui):
         origen = os.path.join(carpeta_cliente, "errors_retirats", nombre)
         if not os.path.exists(origen):
             return None, f"`{nombre}` ja no és a errors_retirats/ -- res a reactivar (potser algú l'ha mogut o destruït)."
-        carpeta_destino = reactivable["carpeta_destino"]
+        origen_registrat = (reactivable.get("info") or {}).get("origen") or ""
+        if origen_registrat:
+            carpeta_destino = os.path.join(RAIZ_PROYECTO, origen_registrat)
+        else:
+            carpeta_destino = reactivable["carpeta_destino"]
         os.makedirs(carpeta_destino, exist_ok=True)
         nombre_base, extension = os.path.splitext(nombre)
         nombre_final = nombre_base + extension
@@ -1014,17 +1020,12 @@ def executar_reactivacio(reactivable, qui):
             contador += 1
         shutil.move(origen, destino)
         desti_curt = os.path.relpath(carpeta_destino, RAIZ_PROYECTO)
-        ruta_registro = os.path.join(carpeta_cliente, "errors_retirats", "registre.csv")
-        escribir_cabecera = not os.path.exists(ruta_registro)
-        with open(ruta_registro, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            if escribir_cabecera:
-                writer.writerow(["arxiu", "motiu", "qui", "data", "nota"])
-            writer.writerow([
-                nombre, f"reactivat: torna a {desti_curt} (re-pujada duplicada)",
-                qui, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "",
-            ])
-        return destino, f"✓ Reactivat: `{nombre_final}` torna a `{desti_curt}` -- es processarà al proper Processar."
+        d_on = "el seu origen registrat" if origen_registrat else "el destí de la pujada (la retirada era d'abans que el registre guardés l'origen)"
+        escribir_fila_registre_retirats(
+            carpeta_cliente, nombre,
+            f"reactivat: torna a {desti_curt} (re-pujada duplicada)", qui,
+        )
+        return destino, f"✓ Reactivat: `{nombre_final}` torna a `{desti_curt}` ({d_on})."
 
     # descartat -- la decisió es desfà, els arxius no s'han mogut mai.
     nombre_json = os.path.splitext(nombre)[0] + ".json"
@@ -1035,6 +1036,54 @@ def executar_reactivacio(reactivable, qui):
     if not revertida:
         return None, f"La fitxa `{nombre_json}` ja no tenia cap decisió a desfer -- res a reactivar."
     return nombre_json, f"✓ Decisió de descartar desfeta: la fitxa `{nombre_json}` torna a comptar -- recorda RECALCULAR."
+
+
+def gemelo_te_fitxa(carpeta_cliente, nombre):
+    """Piso 14E: un retirat reactivat SENSE fitxa necessita una
+    re-extracció (API) per existir per a la gramàtica -- aquesta
+    comprovació decideix quins botons ofereix el panell."""
+    base = os.path.splitext(nombre)[0]
+    for carpeta_validadas in (
+        os.path.join(carpeta_cliente, "rebudes", "validadas"),
+        os.path.join(carpeta_cliente, "apartados", "ingressos_validadas"),
+    ):
+        if os.path.exists(os.path.join(carpeta_validadas, base + ".json")):
+            return True
+    return False
+
+
+def reextraure_un_arxiu(flujo, ruta, carpeta_cliente):
+    """Piso 13T (factoritzat al 14E sense canviar-ne el comportament):
+    reprocessar NOMÉS un arxiu -- una sola crida a extraer_todas.py
+    (mode --archivo) + validar.py. Retorna (exit, missatge). El qui
+    crida ha d'haver comprovat el candau ABANS (mateix criteri que
+    Processar/RECALCULAR: mai dues fàbriques alhora)."""
+    nombre = os.path.basename(ruta)
+    nombre_base = os.path.splitext(nombre)[0]
+    if flujo == "rebudes":
+        carpeta_extraidas = os.path.join(carpeta_cliente, "rebudes", "extraidas")
+        carpeta_validadas = os.path.join(carpeta_cliente, "rebudes", "validadas")
+    else:
+        carpeta_extraidas = os.path.join(carpeta_cliente, "apartados", "ingressos_extraidas")
+        carpeta_validadas = os.path.join(carpeta_cliente, "apartados", "ingressos_validadas")
+    ruta_json_extraidas = os.path.join(carpeta_extraidas, nombre_base + ".json")
+    ruta_json_validadas = os.path.join(carpeta_validadas, nombre_base + ".json")
+    # Neteja l'estat parcial d'AQUEST arxiu concret, mai de la resta --
+    # mai un residu vell que faci "saltada" sense voler en el reintent.
+    for ruta_neteja in (ruta_json_extraidas, ruta_json_validadas):
+        if os.path.exists(ruta_neteja):
+            os.remove(ruta_neteja)
+
+    proceso_extraccio = subprocess.run(
+        [sys.executable, "extraer_todas.py", "--archivo", ruta, "--json", ruta_json_extraidas],
+        cwd=RAIZ_PROYECTO, capture_output=True, text=True,
+    )
+    subprocess.run(
+        [sys.executable, "validar.py"], cwd=RAIZ_PROYECTO, capture_output=True, text=True,
+    )
+    if proceso_extraccio.returncode == 0:
+        return True, f"{nombre} reprocessat -- Recalcula per veure'l a Revisió."
+    return False, f"{nombre} ha tornat a fallar en reprocessar-lo -- queda com a error visible a Revisió."
 
 
 def panell_reactivables():
@@ -1071,24 +1120,55 @@ def panell_reactivables():
                 f"descartat per **{info.get('qui', '?')}** el {info.get('data', '?')}"
                 + (f" amb nota «{info['nota']}»" if info.get("nota") else "")
             )
+        # Piso 14E: un retirat sense fitxa que ressuscita necessita una
+        # re-extracció (API) per tornar a existir per a la gramàtica --
+        # el panell HO DIU i n'ofereix el consentiment aquí mateix, mai
+        # un verb secret per a després.
+        sense_fitxa = r["estat"] == "retirat" and not gemelo_te_fitxa(r["carpeta_cliente"], r["nombre"])
         with st.container(border=True):
             st.warning(
                 f"El document que intentes pujar ({r['nom_pujat']}) ja va entrar com a "
                 f"`{r['nombre']}` i està {descripcio}. No es torna a pujar: tria què fer "
                 f"amb l'original."
             )
+            if sense_fitxa:
+                st.caption(
+                    "Aquest original no té fitxa (va quedar en error abans de retirar-lo): "
+                    "reactivar-lo el torna a la seva carpeta, però fins que no es torni a "
+                    "llegir amb l'API no comptarà enlloc."
+                )
             with st.form(key=f"form_reactivar_{r['clau']}", border=False):
                 qui_reactiva = st.text_input("Qui ho decideix?", key=f"reactivar_qui_{r['clau']}")
-                col_si, col_no = st.columns(2)
-                with col_si:
+                clic_reactivar_llegir = False
+                if sense_fitxa:
+                    clic_reactivar_llegir = st.form_submit_button(
+                        "REACTIVAR i tornar a llegir ara (es tornarà a llegir amb l'API -- cèntims)",
+                        type="primary",
+                    )
+                    clic_reactivar = st.form_submit_button("REACTIVAR i deixar-lo per al proper Processar")
+                else:
                     clic_reactivar = st.form_submit_button("REACTIVAR l'original", type="primary")
-                with col_no:
-                    clic_cancelar = st.form_submit_button("CANCEL·LAR la pujada")
-            if clic_reactivar:
+                clic_cancelar = st.form_submit_button("CANCEL·LAR la pujada")
+            if clic_reactivar or clic_reactivar_llegir:
                 if not qui_reactiva.strip():
                     st.error("Cal escriure un nom abans de reactivar.")
                 else:
                     resultat, missatge = executar_reactivacio(r, qui_reactiva.strip())
+                    if resultat is not None and clic_reactivar_llegir:
+                        candau_rellegir = candau_processar_viu()
+                        if candau_rellegir:
+                            missatge += (
+                                " ⚠ NO s'ha pogut tornar a llegir: hi ha un Processar en marxa "
+                                f"(iniciat per {candau_rellegir.get('qui')}) -- queda pendent."
+                            )
+                        else:
+                            # "rebudes" amb qualsevol caixa (davinstal té "Rebudes").
+                            flux_reactivat = "rebudes" if "rebudes" in os.path.relpath(resultat, RAIZ_PROYECTO).lower() else "ingressos"
+                            with st.spinner("Tornant a llegir l'arxiu (API)..."):
+                                exit_ok, msg_extraccio = reextraure_un_arxiu(
+                                    flux_reactivat, resultat, r["carpeta_cliente"],
+                                )
+                            missatge += f" {'✓' if exit_ok else '⚠'} {msg_extraccio}"
                     st.session_state["afegir_reactivables"] = [
                         x for x in st.session_state["afegir_reactivables"] if x["clau"] != r["clau"]
                     ]
@@ -1758,6 +1838,47 @@ def historial_correccions(carpeta_cliente, nombre):
     return grups
 
 
+CAMPOS_REGISTRE_RETIRATS = ["arxiu", "motiu", "qui", "data", "nota", "origen"]
+
+
+def asegurar_columna_origen(ruta_registro):
+    """Piso 14E: migració mansa i idempotent de registre.csv -- si el
+    csv existent encara no té la columna "origen", es reescriu UNA
+    vegada afegint origen="" a les files velles. Cap fet del llibre
+    canvia (mateixes files, mateix ordre), només guanya una columna;
+    a partir d'aquí tot s'escriu amb l'esquema nou."""
+    if not os.path.exists(ruta_registro):
+        return
+    with open(ruta_registro, encoding="utf-8") as f:
+        lector = csv.reader(f)
+        files = list(lector)
+    if not files or "origen" in files[0]:
+        return
+    with open(ruta_registro, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(CAMPOS_REGISTRE_RETIRATS)
+        for fila in files[1:]:
+            writer.writerow(fila + [""] * (len(CAMPOS_REGISTRE_RETIRATS) - len(fila)))
+
+
+def escribir_fila_registre_retirats(carpeta_cliente, arxiu, motiu, qui, nota="", origen=""):
+    """Piso 14E: únic punt d'escriptura de errors_retirats/registre.csv
+    (retirada i reactivació) -- garanteix la migració de columna abans
+    d'afegir cap fila nova."""
+    carpeta_retirats = os.path.join(carpeta_cliente, "errors_retirats")
+    os.makedirs(carpeta_retirats, exist_ok=True)
+    ruta_registro = os.path.join(carpeta_retirats, "registre.csv")
+    asegurar_columna_origen(ruta_registro)
+    escribir_cabecera = not os.path.exists(ruta_registro)
+    with open(ruta_registro, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if escribir_cabecera:
+            writer.writerow(CAMPOS_REGISTRE_RETIRATS)
+        writer.writerow([
+            arxiu, motiu, qui, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), nota or "", origen or "",
+        ])
+
+
 def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui, nota=None):
     """Piso 11A: filosofia A3 igual que arxivar_cliente (Piso 10.3) --
     nunca shutil.rmtree, solo shutil.move. Vive fuera de rebudes/ y
@@ -1767,7 +1888,11 @@ def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui, nota=None):
     Piso 11C: 'nota' opcional -- la retirada en lot demana una nota
     compartida obligatoria (el motiu tecnic ja ve derivat sol de
     motivo_error, aixo es el que escriu la persona). Columna extra a
-    registre.csv, mai llegida per cap altra maquina (comprovat)."""
+    registre.csv, mai llegida per cap altra maquina (comprovat).
+
+    Piso 14E: columna "origen" nova -- la carpeta (relativa al
+    projecte) d'on surt l'arxiu, perquè desfer la retirada pugui
+    tornar-lo FÍSICAMENT allà on era, mai a un flux endevinat."""
     carpeta_retirats = os.path.join(carpeta_cliente, "errors_retirats")
     os.makedirs(carpeta_retirats, exist_ok=True)
     nombre_base, extension = os.path.splitext(os.path.basename(ruta_archivo))
@@ -1779,17 +1904,9 @@ def retirar_error(carpeta_cliente, ruta_archivo, motivo, qui, nota=None):
         destino = os.path.join(carpeta_retirats, nombre_final)
         contador += 1
 
+    origen_relatiu = os.path.relpath(os.path.dirname(os.path.abspath(ruta_archivo)), RAIZ_PROYECTO)
     shutil.move(ruta_archivo, destino)
-
-    ruta_registro = os.path.join(carpeta_retirats, "registre.csv")
-    escribir_cabecera = not os.path.exists(ruta_registro)
-    with open(ruta_registro, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if escribir_cabecera:
-            writer.writerow(["arxiu", "motiu", "qui", "data", "nota"])
-        writer.writerow([
-            nombre_final, motivo, qui, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), nota or "",
-        ])
+    escribir_fila_registre_retirats(carpeta_cliente, nombre_final, motivo, qui, nota, origen_relatiu)
     return destino
 
 
@@ -1879,6 +1996,49 @@ def contar_manuals_sense_recalcular(carpeta_cliente):
     return contador
 
 
+def ultima_reactivacio(carpeta_cliente, nombre):
+    """Piso 14E: l'última fila de errors_retirats/registre.csv per a
+    aquest arxiu, NOMÉS si és una reactivació -- None si mai s'ha
+    retirat o si l'última acció va ser la retirada mateixa (aleshores
+    és al cementiri, no un recuperat)."""
+    ruta_registre = os.path.join(carpeta_cliente, "errors_retirats", "registre.csv")
+    if not os.path.exists(ruta_registre):
+        return None
+    ultima = None
+    with open(ruta_registre, encoding="utf-8") as f:
+        for fila in csv.DictReader(f):
+            if fila.get("arxiu") == nombre:
+                ultima = fila
+    if ultima and (ultima.get("motiu") or "").startswith("reactivat"):
+        return ultima
+    return None
+
+
+def llistar_recuperats_pendents(carpeta_cliente):
+    """Piso 14E: arxius que han tornat del cementiri (última fila del
+    registre = reactivat) i encara NO tenen fitxa -- necessiten una
+    re-extracció (API) que cap altre comptador anomena. Retorna
+    [(flujo, ruta), ...] per poder posar el botó correcte al costat."""
+    carpeta = os.path.basename(carpeta_cliente)
+    origen_ingressos_rel = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
+    origen_ingressos = os.path.join(carpeta_cliente, *origen_ingressos_rel.split("/"))
+    presents = [("rebudes", r) for r in listar_archivos_rebudes(os.path.join(carpeta_cliente, "rebudes"))]
+    if os.path.isdir(origen_ingressos):
+        presents += [
+            ("ingressos", os.path.join(origen_ingressos, n))
+            for n in sorted(os.listdir(origen_ingressos))
+            if n.lower().endswith(EXTENSIONES_ORIGINAL)
+        ]
+    recuperats = []
+    for flujo, ruta in presents:
+        nombre = os.path.basename(ruta)
+        if gemelo_te_fitxa(carpeta_cliente, nombre):
+            continue
+        if ultima_reactivacio(carpeta_cliente, nombre):
+            recuperats.append((flujo, ruta))
+    return recuperats
+
+
 def contar_canvis_pendents(carpeta_cliente):
     """Piso 14D: la suma dels 4 comptadors "sense recalcular" d'un
     client -- decisions, moviments, retirades i entrades manuals."""
@@ -1936,11 +2096,20 @@ def executar_recalcular():
     # "AVISO:" al log -- el lot ja ha continuat sol, regla 4, pero mai
     # es disfressa d'exit). Cap dels dos casos fa rerun immediat: el
     # missatge i el log s'han de poder llegir.
+    # Piso 14E: l'auditoria de coherència tanca la cadena -- una línia
+    # al log ("Coherència: ✓ 0 divergències") o AVISOs que el detector
+    # de sota ja fa visibles. --informatiu: mai returncode != 0, la
+    # cadena mai mor per una divergència (regla 4).
     aturat_per_error = False
     maquina_fallida = None
-    for maquina in ["validar.py", "sumar.py", "informe.py"]:
+    cadena = [
+        ["validar.py"], ["sumar.py"], ["informe.py"],
+        ["auditar_coherencia.py", "--informatiu"],
+    ]
+    for maquina_args in cadena:
+        maquina = maquina_args[0]
         proceso = subprocess.Popen(
-            [sys.executable, maquina],
+            [sys.executable, *maquina_args],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, cwd=RAIZ_PROYECTO,
         )
@@ -2905,6 +3074,16 @@ def tarjeta_error(flujo, ruta, carpeta_cliente, qui, prefijo):
             st.success("✓ Arxiu retirat.")
         else:
             st.warning(motivo_error(ruta))
+            # Piso 14E: targeta amb memòria -- si aquest arxiu acaba de
+            # tornar del cementiri, es diu aquí mateix, amb el verb que
+            # li cal (mai el motiu enganyós tot sol per a un recuperat).
+            reactivacio = ultima_reactivacio(carpeta_cliente, nombre)
+            if reactivacio:
+                st.info(
+                    f"♻ Recuperat d'errors_retirats el {reactivacio.get('data', '?')} per "
+                    f"{reactivacio.get('qui', '?')} -- cal tornar-lo a llegir perquè torni a "
+                    f"tenir fitxa (botó \"Tornar a processar aquest arxiu\", API)."
+                )
             boton_obrir("Obrir arxiu", ruta, key=f"{prefijo}_error_original_{nombre}")
             st.caption("Torna a pujar l'arxiu bo des d'\"Afegir factures\".")
             col_retirar, col_reprocessar = st.columns(2)
@@ -2926,35 +3105,9 @@ def tarjeta_error(flujo, ruta, carpeta_cliente, qui, prefijo):
                             f"{candau_reprocessar.get('data_inici')}) -- espera que acabi abans de reprocessar."
                         )
                     else:
-                        nombre_base = os.path.splitext(nombre)[0]
-                        if flujo == "rebudes":
-                            carpeta_extraidas = os.path.join(carpeta_cliente, "rebudes", "extraidas")
-                            carpeta_validadas = os.path.join(carpeta_cliente, "rebudes", "validadas")
-                        else:
-                            carpeta_extraidas = os.path.join(carpeta_cliente, "apartados", "ingressos_extraidas")
-                            carpeta_validadas = os.path.join(carpeta_cliente, "apartados", "ingressos_validadas")
-                        ruta_json_extraidas = os.path.join(carpeta_extraidas, nombre_base + ".json")
-                        ruta_json_validadas = os.path.join(carpeta_validadas, nombre_base + ".json")
-                        # Neteja l'estat parcial d'AQUEST arxiu concret,
-                        # mai de la resta -- mai un residu vell que faci
-                        # "saltada" sense voler en el reintent.
-                        for ruta_neteja in (ruta_json_extraidas, ruta_json_validadas):
-                            if os.path.exists(ruta_neteja):
-                                os.remove(ruta_neteja)
-
                         with st.spinner("Reprocessant..."):
-                            proceso_extraccio = subprocess.run(
-                                [sys.executable, "extraer_todas.py", "--archivo", ruta, "--json", ruta_json_extraidas],
-                                cwd=RAIZ_PROYECTO, capture_output=True, text=True,
-                            )
-                            subprocess.run(
-                                [sys.executable, "validar.py"], cwd=RAIZ_PROYECTO, capture_output=True, text=True,
-                            )
-
-                        if proceso_extraccio.returncode == 0:
-                            st.toast(f"{nombre} reprocessat -- Recalcula per veure-ho a Revisió.", icon="✅")
-                        else:
-                            st.toast(f"{nombre} ha tornat a fallar en reprocessar-lo.", icon="⚠️")
+                            exit_ok, missatge = reextraure_un_arxiu(flujo, ruta, carpeta_cliente)
+                        st.toast(missatge, icon="✅" if exit_ok else "⚠️")
                         st.rerun(scope="fragment")
 
 
@@ -3546,6 +3699,44 @@ elif vista == "Revisió":
                 if st.button("RECALCULAR ARA", key="revisio_recalcular_avis", type="primary"):
                     executar_recalcular()
 
+        # Piso 14E: els recuperats del cementiri SENSE fitxa necessiten
+        # una re-extracció (API) -- Recalcular no els arregla, i fins
+        # ara cap avís anomenava el verb correcte. Botó al costat de
+        # cada un, mai un verb secret.
+        recuperats_pendents = llistar_recuperats_pendents(estado["carpeta_cliente"])
+        if recuperats_pendents:
+            with st.container(border=True):
+                st.warning(
+                    f"Hi ha {len(recuperats_pendents)} recuperats d'errors_retirats esperant "
+                    f"re-lectura -- sense fitxa no compten enlloc, i RECALCULAR no els llegeix "
+                    f"(cal l'API)."
+                )
+                for flujo_rec, ruta_rec in recuperats_pendents:
+                    nombre_rec = os.path.basename(ruta_rec)
+                    col_nom_rec, col_boto_rec = st.columns([3, 2])
+                    with col_nom_rec:
+                        st.write(f"{FLUX_ETIQUETA[flujo_rec]} `{nombre_rec}`")
+                    with col_boto_rec:
+                        if st.button(
+                            "Tornar a llegir ara (API -- cèntims)",
+                            key=f"rellegir_recuperat_{nombre_rec}",
+                        ):
+                            candau_rellegir = candau_processar_viu()
+                            if candau_rellegir:
+                                st.error(
+                                    f"Hi ha un Processar en marxa (iniciat per {candau_rellegir.get('qui')}) "
+                                    "-- espera que acabi abans de re-llegir."
+                                )
+                            else:
+                                with st.spinner("Tornant a llegir l'arxiu (API)..."):
+                                    exit_ok, msg_rec = reextraure_un_arxiu(
+                                        flujo_rec, ruta_rec, estado["carpeta_cliente"],
+                                    )
+                                if exit_ok:
+                                    st.success(f"✓ {msg_rec}")
+                                else:
+                                    st.error(f"⚠ {msg_rec}")
+
         if st.button(
             "RECALCULAR", key="revisio_recalcular",
             type="primary" if n_canvis_pendents else "secondary",
@@ -3865,6 +4056,28 @@ elif vista == "Manteniment":
                 opciones_m = {f"{f['nombre']} ({f['carpeta']})": f["carpeta"] for f in clientes_m}
                 eleccion_m = st.selectbox("Client", list(opciones_m.keys()), key="manteniment_client")
                 carpeta_m = opciones_m[eleccion_m]
+
+                # Piso 14E: l'auditor de coherència a mà -- les QUATRE
+                # capes (física/fitxa/llibres/vistes) de cada document
+                # del client, en viu (import directe: és codi pur).
+                st.subheader("Auditar coherència")
+                st.caption(
+                    "Comprova que cada document és exactament on el seu estat mana: "
+                    "arxiu, fitxa, llibres i Excel d'acord. Gratuït, sense API."
+                )
+                if st.button("Auditar coherència", key=f"auditar_coherencia_{carpeta_m}"):
+                    import auditar_coherencia
+                    divergencies_aud = auditar_coherencia.auditar_client(carpeta_m)
+                    if not divergencies_aud:
+                        st.success("Coherència: ✓ 0 divergències -- sistema sencer.")
+                    else:
+                        st.error(f"Coherència: ✗ {len(divergencies_aud)} divergències:")
+                        st.table([
+                            {
+                                "Document": d["document"], "Capa": d["capa"],
+                                "Esperat": d["esperat"], "Trobat": d["trobat"],
+                            } for d in divergencies_aud
+                        ])
 
                 retirats, descartats = candidatos_destruccio(carpeta_m)
 

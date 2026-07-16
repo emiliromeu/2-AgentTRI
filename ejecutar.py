@@ -34,7 +34,11 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parent
 os.chdir(RAIZ)
 
-MAQUINAS = ["trocear.py", "extraer_todas.py", "validar.py", "sumar.py", "informe.py"]
+# Piso 14E: l'auditoria de coherència tanca el pipeline -- --informatiu
+# fa que mai retorni != 0 (la cadena no mor per una divergència, regla
+# 4), però les divergències surten com a "AVISO: coherència ..." i el
+# detector d'AVISO d'app.py les fa visibles.
+MAQUINAS = ["trocear.py", "extraer_todas.py", "validar.py", "sumar.py", "informe.py", "auditar_coherencia.py --informatiu"]
 
 RUTA_LOCK = RAIZ / "processar.lock"
 RUTA_STOP = RAIZ / "processar.stop"
@@ -115,7 +119,7 @@ try:
     aturat_per_stop = False
     for maquina in MAQUINAS:
         banner(f"Ejecutando {maquina}")
-        resultado = subprocess.run([sys.executable, maquina], cwd=RAIZ)
+        resultado = subprocess.run([sys.executable, *maquina.split()], cwd=RAIZ)
         if resultado.returncode != 0:
             print(f"\nAVISO: {maquina} terminó con un error (código {resultado.returncode}). Parando la cadena aquí.")
             sys.exit(1)

@@ -41,3 +41,11 @@ docs/esquema_canonico_v1.md — leerlo antes de tocar código.
     los cubos por tipo de IVA, Total, Líquid y RESULTAT desde
     validadas/*.json + decisions.csv sin importar sumar.py, y los
     compara célula a célula contra el Excel generado.
+12. Ningún piso toca MUTACIONES (mover de cliente/flujo, retirar,
+    reactivar, corregir, decidir, deshacer, entrada manual) sin pasar
+    `python3 auditar_coherencia.py` contra los 4 clientes reales
+    (0 divergencias) — auditor independiente (Piso 14E) que verifica
+    las CUATRO capas de cada documento: física (el archivo donde su
+    estado manda), ficha (activa ↔ original, o manual legítima),
+    libros (hashos/decisions/moviments consistentes) y vistas (lo
+    vivo en el Excel, lo muerto fuera).
