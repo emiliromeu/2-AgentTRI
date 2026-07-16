@@ -725,6 +725,99 @@ def registrar_hash(carpeta_cliente, hash_archivo, nombre):
         writer.writerow([hash_archivo, nombre])
 
 
+FLUX_NOM_PLA = {"rebudes": "compres", "ingressos": "vendes"}
+
+
+def resoldre_estat_gemelo(carpeta_cliente, nombre):
+    """Piso 14D: el guardià de contingut (hash) coneixia el NOM del
+    gemelo però no el seu ESTAT -- un duplicat d'un document RETIRAT o
+    DESCARTAT es rebutjava mut cap a un fantasma (forense del piso: el
+    document quedava al limbo, irrecuperable des de la UI).
+
+    L'estat es resol EN VIU contra el sistema de fitxers i els llibres
+    majors (registre.csv, decisions.csv, moviments_flux.csv,
+    registre_destruccions.csv), MAI amb una columna d'estat a
+    hashos.csv: cap dels verbs que maten un document (retirar,
+    descartar, destruir, moure) sap res de l'índex de hashos -- una
+    columna hi naixeria mentidera i caldria tocar quatre llocs perquè
+    no ho fos. Retorna (estat, info):
+      "viu_pendent"  a l'entrada, esperant Processar (info: flux)
+      "viu"          fitxa activa a validadas (info: estado, flux)
+      "descartat"    decisió efectiva descartar (info: fila decisió)
+      "retirat"      a errors_retirats/ (info: fila de registre.csv)
+      "mogut"        mogut a un altre client, 13Q (info: fila moviment)
+      "destruit"     certificat a registre_destruccions.csv (info: fila)
+      "fantasma"     hash conegut però cap rastre enlloc (info: None)
+    """
+    carpeta = os.path.basename(carpeta_cliente)
+    base = os.path.splitext(nombre)[0]
+    nombre_json = base + ".json"
+    origen_ingressos_rel = RUTAS_ORIGEN_INGRESSOS_PERSONALIZADAS.get(carpeta, "apartados/ingressos")
+    origen_ingressos = os.path.join(carpeta_cliente, *origen_ingressos_rel.split("/"))
+
+    # 1) pendent de processar: present a l'entrada d'algun flux.
+    rutes_entrada = listar_archivos_rebudes(os.path.join(carpeta_cliente, "rebudes"))
+    if any(os.path.basename(r) == nombre for r in rutes_entrada):
+        return "viu_pendent", {"flux": "rebudes"}
+    if os.path.isdir(origen_ingressos) and os.path.exists(os.path.join(origen_ingressos, nombre)):
+        return "viu_pendent", {"flux": "ingressos"}
+
+    # 2) fitxa activa (o descartada): validadas + decisions.csv.
+    decisiones = cargar_decisiones(carpeta_cliente)
+    for flux, carpeta_validadas in (
+        ("rebudes", os.path.join(carpeta_cliente, "rebudes", "validadas")),
+        ("ingressos", os.path.join(carpeta_cliente, "apartados", "ingressos_validadas")),
+    ):
+        ruta_validada = os.path.join(carpeta_validadas, nombre_json)
+        if not os.path.exists(ruta_validada):
+            continue
+        decision = decisiones.get(nombre_json)
+        if estat_efectiu(decision) == "descartar":
+            return "descartat", dict(decision)
+        with open(ruta_validada, encoding="utf-8") as f:
+            datos = json.load(f)
+        return "viu", {
+            "estado": datos.get("estado") or "?", "flux": flux,
+            "aprovat": estat_efectiu(decision) == "aprovar",
+        }
+
+    # 2b) original a procesadas/ però encara sense fitxa validada (mig
+    # camí del pipeline) -- viu igualment, mai deixar-lo passar.
+    if os.path.exists(os.path.join(carpeta_cliente, "rebudes", "procesadas", nombre)):
+        return "viu", {"estado": "processada, fitxa pendent", "flux": "rebudes", "aprovat": False}
+
+    # 3) retirat: l'arxiu és a errors_retirats/ (l'última fila del seu
+    # registre.csv en dona qui/data/motiu/nota).
+    carpeta_retirats = os.path.join(carpeta_cliente, "errors_retirats")
+    if os.path.exists(os.path.join(carpeta_retirats, nombre)):
+        info = {}
+        ruta_registre = os.path.join(carpeta_retirats, "registre.csv")
+        if os.path.exists(ruta_registre):
+            with open(ruta_registre, encoding="utf-8") as f:
+                for fila in csv.DictReader(f):
+                    if fila.get("arxiu") == nombre:
+                        info = dict(fila)
+        return "retirat", info
+
+    # 4) mogut a un altre client (13Q: la columna "a" porta "carpeta:flux").
+    moviment = obtener_moviment(carpeta_cliente, base)
+    if moviment and ":" in (moviment.get("a") or ""):
+        return "mogut", dict(moviment)
+
+    # 5) destruït amb certificat (13N: "detall" porta els noms destruïts).
+    ruta_destruccions = os.path.join(carpeta_cliente, "registre_destruccions.csv")
+    if os.path.exists(ruta_destruccions):
+        ultima = None
+        with open(ruta_destruccions, encoding="utf-8") as f:
+            for fila in csv.DictReader(f):
+                if base in (fila.get("detall") or ""):
+                    ultima = fila
+        if ultima:
+            return "destruit", dict(ultima)
+
+    return "fantasma", None
+
+
 def guardar_archivo(archivo_subido, carpeta_destino):
     """Guarda un archivo subido; .heic/.heif se convierten a .jpg con
     pillow-heif. Si el nombre ya existe, anade un sufijo numerico en
@@ -773,33 +866,246 @@ def guardar_y_reportar(archivos, carpeta_destino, carpeta_cliente, carpetas_hash
     reintrodueix el mateix paper amb un nom nou; el hash SHA-256 el
     reconeix igual. carpetas_hash_extra permet incloure un sibling ja
     conegut ("rebudes/procesadas") a la comprovacio, a mes de la propia
-    carpeta_destino."""
+    carpeta_destino.
+
+    Piso 14D: el guardià ja distingeix vius de morts -- per cada
+    duplicat es resol l'ESTAT del gemelo (resoldre_estat_gemelo):
+    viu -> rebuig informatiu amb nom i estat; retirat/descartat -> res
+    de rebuig mut, s'encua a st.session_state["afegir_reactivables"] i
+    panell_reactivables (vista Afegir factures) ofereix REACTIVAR o
+    CANCEL·LAR; destruït/fantasma -> l'original ja no existeix al
+    sistema, es deixa passar com a document nou amb avís visible."""
     ja_desats = st.session_state.setdefault("afegir_ja_desats", set())
+    reactivables = st.session_state.setdefault("afegir_reactivables", [])
     indice_hash = cargar_indice_hashos(carpeta_cliente, [carpeta_destino, *carpetas_hash_extra])
     nombres_finales = []
     ja_existents = []
+    passats_amb_avis = []
+    nous_reactivables = False
     for a in archivos:
         if a.file_id in ja_desats:
             continue
         hash_arxiu = hash_sha256_bytes(a.getvalue())
         if hash_arxiu in indice_hash:
-            ja_existents.append((a.name, indice_hash[hash_arxiu]))
-            ja_desats.add(a.file_id)
-            continue
+            nombre_existent = indice_hash[hash_arxiu]
+            estat, info = resoldre_estat_gemelo(carpeta_cliente, nombre_existent)
+            if estat in ("retirat", "descartat"):
+                clau = f"{carpeta_cliente}|{nombre_existent}"
+                if not any(r["clau"] == clau for r in reactivables):
+                    reactivables.append({
+                        "clau": clau, "carpeta_cliente": carpeta_cliente,
+                        "nombre": nombre_existent, "estat": estat, "info": info,
+                        "carpeta_destino": carpeta_destino, "nom_pujat": a.name,
+                    })
+                    nous_reactivables = True
+                ja_desats.add(a.file_id)
+                continue
+            if estat in ("destruit", "fantasma"):
+                # L'original ja no existeix al sistema -- bloquejar-lo
+                # seria el limbo etern del forense. Es desa com a nou i
+                # es diu ben alt d'on ve el hash conegut.
+                passats_amb_avis.append((a.name, nombre_existent, estat, info))
+            else:
+                ja_existents.append((a.name, nombre_existent, estat, info))
+                ja_desats.add(a.file_id)
+                continue
         nombre_final = guardar_archivo(a, carpeta_destino)
         indice_hash[hash_arxiu] = nombre_final
         registrar_hash(carpeta_cliente, hash_arxiu, nombre_final)
         nombres_finales.append(nombre_final)
         ja_desats.add(a.file_id)
 
+    missatges = []
     if nombres_finales:
-        st.success(f"S'han desat {len(nombres_finales)} arxius a `{carpeta_destino}`:")
+        missatges.append(("success", f"S'han desat {len(nombres_finales)} arxius a `{carpeta_destino}`:"))
         for nombre in nombres_finales:
-            st.write(f"- {nombre}")
-    for nombre_pujat, nombre_existent in ja_existents:
-        st.warning(f"Aquest arxiu ja existeix com a `{nombre_existent}` -- no s'ha tornat a pujar ({nombre_pujat}).")
-    if not nombres_finales and not ja_existents:
-        st.info("Aquests arxius ja s'havien desat abans en aquesta sessió -- no s'ha tornat a escriure res.")
+            missatges.append(("write", f"- {nombre}"))
+    for nombre_pujat, nombre_existent, estat, info in ja_existents:
+        missatges.append(("warning",
+            f"Ja existeix com a `{nombre_existent}` ({descriure_estat_gemelo(estat, info)}) "
+            f"-- no s'ha tornat a pujar ({nombre_pujat})."
+        ))
+    for nombre_pujat, nombre_existent, estat, info in passats_amb_avis:
+        if estat == "destruit":
+            missatges.append(("warning",
+                f"Aquest contingut havia entrat abans com a `{nombre_existent}` i es va DESTRUIR "
+                f"el {info.get('data', '?')} per {info.get('qui', '?')} (certificat a "
+                f"registre_destruccions.csv) -- es torna a acceptar com a document nou."
+            ))
+        else:
+            missatges.append(("warning",
+                f"El hash d'aquest arxiu coincideix amb `{nombre_existent}`, però aquell nom ja "
+                f"no existeix enlloc del client (cap registre ho explica) -- es torna a acceptar "
+                f"com a document nou."
+            ))
+    if not missatges and not reactivables:
+        missatges.append(("info", "Aquests arxius ja s'havien desat abans en aquesta sessió -- no s'ha tornat a escriure res."))
+
+    if nous_reactivables:
+        # Piso 14D: el panell d'elecció es renderitza a DALT de la vista
+        # i aquest codi corre DESPRÉS (dins del clic de "Desar arxius")
+        # -- sense rerun, el panell no es veuria fins a la següent
+        # interacció (comprovat en directe: pantalla muda). Els
+        # missatges d'aquest lot es guarden i els ensenya el panell.
+        st.session_state.setdefault("afegir_msgs_pendents", []).extend(missatges)
+        st.rerun()
+    for tipus, text in missatges:
+        _mostrar_missatge(tipus, text)
+
+
+def _mostrar_missatge(tipus, text):
+    """Piso 14D: un missatge de guardar_y_reportar, en directe o
+    re-emès pel panell després del rerun -- mateix aspecte als dos
+    camins."""
+    if tipus == "success":
+        st.success(text)
+    elif tipus == "warning":
+        st.warning(text)
+    elif tipus == "info":
+        st.info(text)
+    else:
+        st.write(text)
+
+
+def descriure_estat_gemelo(estat, info):
+    """Piso 14D: la frase curta d'estat que acompanya el nom del gemelo
+    al rebuig informatiu -- "(OK, al flux de compres)" i companyia."""
+    info = info or {}
+    flux_pla = FLUX_NOM_PLA.get(info.get("flux"), info.get("flux") or "?")
+    if estat == "viu_pendent":
+        return f"pendent de processar, a l'entrada de {flux_pla}"
+    if estat == "viu":
+        etiqueta = info.get("estado") or "?"
+        if info.get("aprovat"):
+            etiqueta += ", aprovada manualment"
+        return f"fitxa {etiqueta}, al flux de {flux_pla}"
+    if estat == "mogut":
+        return f"mogut al client {formatar_moviment_costat(info.get('a'))} el {info.get('data', '?')}"
+    return estat
+
+
+def executar_reactivacio(reactivable, qui):
+    """Piso 14D: desfà la mort del gemelo, sempre amb fila nova al
+    llibre corresponent (mai esborrar -- filosofia 13M/13N):
+    - retirat: shutil.move d'errors_retirats/ cap a l'entrada del flux
+      que s'estava pujant + fila "reactivat" a registre.csv (la data
+      nova fa que contar_retirs_sense_recalcular encengui sol el
+      semàfor, que és exactament el que toca).
+    - descartat: revertir_decision (el mecanisme EXACTE del 13M -- fila
+      "revertir" nova a decisions.csv, la fitxa torna a comptar segons
+      el seu estado de sempre).
+    Retorna el missatge d'èxit per ensenyar."""
+    carpeta_cliente = reactivable["carpeta_cliente"]
+    nombre = reactivable["nombre"]
+
+    if reactivable["estat"] == "retirat":
+        origen = os.path.join(carpeta_cliente, "errors_retirats", nombre)
+        if not os.path.exists(origen):
+            return None, f"`{nombre}` ja no és a errors_retirats/ -- res a reactivar (potser algú l'ha mogut o destruït)."
+        carpeta_destino = reactivable["carpeta_destino"]
+        os.makedirs(carpeta_destino, exist_ok=True)
+        nombre_base, extension = os.path.splitext(nombre)
+        nombre_final = nombre_base + extension
+        destino = os.path.join(carpeta_destino, nombre_final)
+        contador = 2
+        while os.path.exists(destino):
+            nombre_final = f"{nombre_base}_{contador}{extension}"
+            destino = os.path.join(carpeta_destino, nombre_final)
+            contador += 1
+        shutil.move(origen, destino)
+        desti_curt = os.path.relpath(carpeta_destino, RAIZ_PROYECTO)
+        ruta_registro = os.path.join(carpeta_cliente, "errors_retirats", "registre.csv")
+        escribir_cabecera = not os.path.exists(ruta_registro)
+        with open(ruta_registro, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if escribir_cabecera:
+                writer.writerow(["arxiu", "motiu", "qui", "data", "nota"])
+            writer.writerow([
+                nombre, f"reactivat: torna a {desti_curt} (re-pujada duplicada)",
+                qui, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "",
+            ])
+        return destino, f"✓ Reactivat: `{nombre_final}` torna a `{desti_curt}` -- es processarà al proper Processar."
+
+    # descartat -- la decisió es desfà, els arxius no s'han mogut mai.
+    nombre_json = os.path.splitext(nombre)[0] + ".json"
+    revertida = revertir_decision(
+        carpeta_cliente, nombre_json,
+        "reactivada des d'Afegir factures (re-pujada duplicada)", qui,
+    )
+    if not revertida:
+        return None, f"La fitxa `{nombre_json}` ja no tenia cap decisió a desfer -- res a reactivar."
+    return nombre_json, f"✓ Decisió de descartar desfeta: la fitxa `{nombre_json}` torna a comptar -- recorda RECALCULAR."
+
+
+def panell_reactivables():
+    """Piso 14D: el panell d'elecció per als gemelos morts detectats en
+    pujar -- INLINE (mai st.dialog: la trampa coneguda dels reruns que
+    el tanquen i de la X que el descarta en silenci, contra la regla
+    10). Mentre hi hagi entrades pendents, el panell es renderitza a
+    CADA rerun de la vista Afegir factures i cada entrada exigeix un
+    clic explícit (REACTIVAR o CANCEL·LAR). st.form per entrada: el
+    camp "qui" s'aplica en polsar el botó, mai depenent de Tab/Enter
+    (regla 10)."""
+    msg_previ = st.session_state.pop("reactivar_msg_exit", None)
+    if msg_previ:
+        st.success(msg_previ)
+    # Missatges del lot de pujada que va disparar el rerun del panell
+    # (guardar_y_reportar els deixa aquí per no perdre'ls pel camí).
+    for tipus, text in st.session_state.pop("afegir_msgs_pendents", []):
+        _mostrar_missatge(tipus, text)
+
+    reactivables = st.session_state.get("afegir_reactivables") or []
+    if not reactivables:
+        return
+
+    for r in reactivables:
+        info = r.get("info") or {}
+        if r["estat"] == "retirat":
+            descripcio = (
+                f"retirat per **{info.get('qui', '?')}** el {info.get('data', '?')}"
+                + (f" amb nota «{info['nota']}»" if info.get("nota") else "")
+                + (f" (motiu: {info.get('motiu')})" if info.get("motiu") else "")
+            )
+        else:
+            descripcio = (
+                f"descartat per **{info.get('qui', '?')}** el {info.get('data', '?')}"
+                + (f" amb nota «{info['nota']}»" if info.get("nota") else "")
+            )
+        with st.container(border=True):
+            st.warning(
+                f"El document que intentes pujar ({r['nom_pujat']}) ja va entrar com a "
+                f"`{r['nombre']}` i està {descripcio}. No es torna a pujar: tria què fer "
+                f"amb l'original."
+            )
+            with st.form(key=f"form_reactivar_{r['clau']}", border=False):
+                qui_reactiva = st.text_input("Qui ho decideix?", key=f"reactivar_qui_{r['clau']}")
+                col_si, col_no = st.columns(2)
+                with col_si:
+                    clic_reactivar = st.form_submit_button("REACTIVAR l'original", type="primary")
+                with col_no:
+                    clic_cancelar = st.form_submit_button("CANCEL·LAR la pujada")
+            if clic_reactivar:
+                if not qui_reactiva.strip():
+                    st.error("Cal escriure un nom abans de reactivar.")
+                else:
+                    resultat, missatge = executar_reactivacio(r, qui_reactiva.strip())
+                    st.session_state["afegir_reactivables"] = [
+                        x for x in st.session_state["afegir_reactivables"] if x["clau"] != r["clau"]
+                    ]
+                    if resultat is None:
+                        st.session_state["reactivar_msg_exit"] = f"⚠ {missatge}"
+                    else:
+                        st.session_state["reactivar_msg_exit"] = missatge
+                    st.rerun()
+            if clic_cancelar:
+                st.session_state["afegir_reactivables"] = [
+                    x for x in st.session_state["afegir_reactivables"] if x["clau"] != r["clau"]
+                ]
+                st.session_state["reactivar_msg_exit"] = (
+                    f"Pujada de {r['nom_pujat']} cancel·lada -- l'original `{r['nombre']}` "
+                    f"es queda {r['estat']} tal com estava."
+                )
+                st.rerun()
 
 
 def entrada_manual_factura(fila_afegir, carpeta):
@@ -1571,6 +1877,97 @@ def contar_manuals_sense_recalcular(carpeta_cliente):
             if marca > mtime_informe:
                 contador += 1
     return contador
+
+
+def contar_canvis_pendents(carpeta_cliente):
+    """Piso 14D: la suma dels 4 comptadors "sense recalcular" d'un
+    client -- decisions, moviments, retirades i entrades manuals."""
+    return (
+        contar_decisiones_sin_recalcular(carpeta_cliente)
+        + contar_moviments_sense_recalcular(carpeta_cliente)
+        + contar_retirs_sense_recalcular(carpeta_cliente)
+        + contar_manuals_sense_recalcular(carpeta_cliente)
+    )
+
+
+def contar_canvis_pendents_tots_clients():
+    """Piso 14D: el mateix, sumat per a TOTS els clients -- per a
+    l'avís final de Processar ("Fet. Recorda: ...")."""
+    return sum(
+        contar_canvis_pendents(ruta_proyecto("clientes", f["carpeta"]))
+        for f in leer_clientes()
+    )
+
+
+def executar_recalcular():
+    """Piso 13S: RECALCULAR crida la MATEIXA cadena (validar->sumar->
+    informe) sobre els MATEIXOS arxius que Processar -- mai a la
+    vegada, per no arriscar una escriptura concurrent real.
+
+    Piso 14D: factoritzat sense tocar-ne el comportament, perquè ara
+    es crida des de DOS botons (el general de Revisió i el de dins de
+    l'avís de canvis pendents)."""
+    candau_recalcular = candau_processar_viu()
+    if candau_recalcular:
+        st.error(
+            f"Hi ha un Processar en marxa (iniciat per {candau_recalcular.get('qui')} a les "
+            f"{candau_recalcular.get('data_inici')}) -- espera que acabi abans de Recalcular, "
+            "per no escriure als mateixos arxius alhora."
+        )
+        return
+
+    placeholder = st.empty()
+    buffer = ""
+    # Piso 11B: validar.py entra en la cadena -- las correccions.csv
+    # solo se aplican en memoria dentro de validar.py, asi que hace
+    # falta volver a correrlo para que una correccio "torni a passar
+    # l'examen". Sigue sin llamadas a la API (validar.py es pura
+    # logica Python), igual de gratis que sumar.py/informe.py.
+    #
+    # Piso 13P: bug de confiança trobat en directe -- si l'Excel
+    # (o l'informe) d'un client estava obert, sumar.py/informe.py
+    # ja el saltaven be (Piso 13G/13P) i seguien amb la resta, pero
+    # aquest bloc mai comprovava proceso.returncode ni guardava el
+    # buffer -- sempre acabava en "Recalculat." + st.rerun()
+    # immediat, que esborrava la pantalla ABANS que ningu pogues
+    # llegir l'AVISO. Mateix patró que "Processar": es distingeix un
+    # crash de veritat (returncode != 0 -- atura la cadena, com
+    # ejecutar.py) d'un avis de fitxer bloquejat (returncode 0 pero
+    # "AVISO:" al log -- el lot ja ha continuat sol, regla 4, pero mai
+    # es disfressa d'exit). Cap dels dos casos fa rerun immediat: el
+    # missatge i el log s'han de poder llegir.
+    aturat_per_error = False
+    maquina_fallida = None
+    for maquina in ["validar.py", "sumar.py", "informe.py"]:
+        proceso = subprocess.Popen(
+            [sys.executable, maquina],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, cwd=RAIZ_PROYECTO,
+        )
+        for linea in proceso.stdout:
+            buffer += linea
+            placeholder.code(buffer)
+        proceso.wait()
+        if proceso.returncode != 0:
+            aturat_per_error = True
+            maquina_fallida = maquina
+            break
+
+    st.session_state["log_recalcular"] = buffer
+
+    if aturat_per_error:
+        st.error(
+            f"{maquina_fallida} ha acabat amb un error (codi {proceso.returncode}) -- "
+            f"aturant la cadena aquí. Revisa el registre de sota."
+        )
+    elif "AVISO:" in buffer:
+        st.warning(
+            "Recalculat, PERÒ algun client no s'ha pogut actualitzar (Excel o informe "
+            "obert?). Revisa el registre de sota abans de confiar en les xifres."
+        )
+    else:
+        st.success("Recalculat.")
+        st.rerun()
 
 
 def tiene_correccion_pendiente(carpeta_cliente, nombre):
@@ -2764,6 +3161,12 @@ elif vista == "Afegir factures":
     st.header("Afegir factures")
     clientes = leer_clientes()
 
+    # Piso 14D: els gemelos morts detectats en pujar (retirats/
+    # descartats) esperen aquí una decisió explícita -- el panell es
+    # renderitza SEMPRE el primer, a cada rerun, fins que cada entrada
+    # tingui el seu clic (REACTIVAR o CANCEL·LAR). Mai un rebuig mut.
+    panell_reactivables()
+
     if not clientes:
         st.info("Primer cal donar d'alta un client a la pestanya 'Clients'.")
     else:
@@ -2989,6 +3392,18 @@ elif vista == "Processar":
 
                 if proceso.returncode == 0:
                     st.success("Procés acabat.")
+                    # Piso 14D: mai més dos verbs sense senyalització --
+                    # si en acabar queden canvis que Processar no ha
+                    # aplicat (un client saltat per Excel/informe obert,
+                    # una decisió presa mentre corria), es diu aquí
+                    # mateix. Normalment és 0: l'informe regenerat
+                    # reseteja sols els comptadors.
+                    n_pendents_recalc = contar_canvis_pendents_tots_clients()
+                    if n_pendents_recalc:
+                        st.warning(
+                            f"Fet. Recorda: hi ha {n_pendents_recalc} canvis (decisions/moviments/"
+                            f"retirades/entrades manuals) pendents de Recalcular -- vés a Revisió."
+                        )
                 else:
                     st.error(f"El procés ha acabat amb error (codi {proceso.returncode}).")
 
@@ -3002,6 +3417,15 @@ elif vista == "Processar":
                         st.error("L'últim Processar va acabar amb un error. Revisa el registre de sota.")
                     elif "Pipeline completo" in log_final:
                         st.success("Últim Processar acabat.")
+                        # Piso 14D: mateix avís que en acabar en directe
+                        # -- qui torna a aquesta vista més tard també ha
+                        # de veure que queden canvis per Recalcular.
+                        n_pendents_recalc = contar_canvis_pendents_tots_clients()
+                        if n_pendents_recalc:
+                            st.warning(
+                                f"Recorda: hi ha {n_pendents_recalc} canvis (decisions/moviments/"
+                                f"retirades/entrades manuals) pendents de Recalcular -- vés a Revisió."
+                            )
 
                     with st.expander("Registre de l'últim Processar", expanded=False):
                         st.code(log_final)
@@ -3070,13 +3494,13 @@ elif vista == "Revisió":
         n_retirs_sense_recalcular = contar_retirs_sense_recalcular(estado["carpeta_cliente"])
         n_manuals_sense_recalcular = contar_manuals_sense_recalcular(estado["carpeta_cliente"])
 
+        # Piso 14D: el subheader es queda amb la part humana; els 4
+        # comptadors en clau ("retirs sense recalcular"...) es
+        # tradueixen a UN avís en llenguatge d'accions, més avall, amb
+        # el botó de RECALCULAR a dins.
         st.subheader(
             f"{n_pendents} pendents per decidir ({n_pendents_compres} compres · {n_pendents_vendes} vendes) · "
-            f"{n_errores} errors per resoldre · "
-            f"{n_decidits} decidits · {n_sin_recalcular} decisions noves sense recalcular · "
-            f"{n_moguts_sense_recalcular} moguts sense recalcular · "
-            f"{n_retirs_sense_recalcular} retirs sense recalcular · "
-            f"{n_manuals_sense_recalcular} entrades manuals sense recalcular"
+            f"{n_errores} errors per resoldre · {n_decidits} decidits"
         )
 
         # Piso 11C: cada targeta es un @st.fragment -- Aprovar/Descartar/
@@ -3096,77 +3520,37 @@ elif vista == "Revisió":
             if st.button("Actualitzar comptadors", key="revisio_actualitzar_comptadors"):
                 st.rerun()
 
+        # Piso 14D: la trampa dels dos verbs -- "X retirs sense
+        # recalcular" era clau interna sense acció a mà. Ara l'avís
+        # parla en accions humanes i porta el botó A DINS. La cadena
+        # de recalcular és EXACTAMENT la mateixa (executar_recalcular,
+        # factoritzada sense tocar-ne una línia de comportament).
+        n_canvis_pendents = (
+            n_sin_recalcular + n_moguts_sense_recalcular
+            + n_retirs_sense_recalcular + n_manuals_sense_recalcular
+        )
+        if n_canvis_pendents:
+            with st.container(border=True):
+                parts = [
+                    f"{n} {etiqueta}" for n, etiqueta in (
+                        (n_sin_recalcular, "decisions"),
+                        (n_moguts_sense_recalcular, "moviments"),
+                        (n_retirs_sense_recalcular, "retirades"),
+                        (n_manuals_sense_recalcular, "entrades manuals"),
+                    ) if n
+                ]
+                st.warning(
+                    f"Hi ha {n_canvis_pendents} canvis ({', '.join(parts)}) pendents "
+                    f"d'aplicar als resultats -- l'Excel i l'informe encara no els reflecteixen."
+                )
+                if st.button("RECALCULAR ARA", key="revisio_recalcular_avis", type="primary"):
+                    executar_recalcular()
+
         if st.button(
             "RECALCULAR", key="revisio_recalcular",
-            type="primary" if (
-                n_sin_recalcular > 0 or n_moguts_sense_recalcular > 0 or n_retirs_sense_recalcular > 0
-                or n_manuals_sense_recalcular > 0
-            ) else "secondary",
+            type="primary" if n_canvis_pendents else "secondary",
         ):
-            # Piso 13S: RECALCULAR crida la MATEIXA cadena (validar->sumar->
-            # informe) sobre els MATEIXOS arxius que Processar -- mai a la
-            # vegada, per no arriscar una escriptura concurrent real.
-            candau_recalcular = candau_processar_viu()
-            if candau_recalcular:
-                st.error(
-                    f"Hi ha un Processar en marxa (iniciat per {candau_recalcular.get('qui')} a les "
-                    f"{candau_recalcular.get('data_inici')}) -- espera que acabi abans de Recalcular, "
-                    "per no escriure als mateixos arxius alhora."
-                )
-            else:
-                placeholder = st.empty()
-                buffer = ""
-                # Piso 11B: validar.py entra en la cadena -- las correccions.csv
-                # solo se aplican en memoria dentro de validar.py, asi que hace
-                # falta volver a correrlo para que una correccio "torni a passar
-                # l'examen". Sigue sin llamadas a la API (validar.py es pura
-                # logica Python), igual de gratis que sumar.py/informe.py.
-                #
-                # Piso 13P: bug de confiança trobat en directe -- si l'Excel
-                # (o l'informe) d'un client estava obert, sumar.py/informe.py
-                # ja el saltaven be (Piso 13G/13P) i seguien amb la resta, pero
-                # aquest bloc mai comprovava proceso.returncode ni guardava el
-                # buffer -- sempre acabava en "Recalculat." + st.rerun()
-                # immediat, que esborrava la pantalla ABANS que ningu pogues
-                # llegir l'AVISO. Mateix patró que "Processar" (mes amunt): es
-                # distingeix un crash de veritat (returncode != 0 -- atura la
-                # cadena, com ejecutar.py) d'un avis de fitxer bloquejat
-                # (returncode 0 pero "AVISO:" al log -- el lot ja ha continuat
-                # sol, regla 4, pero mai es disfressa d'exit). Cap dels dos
-                # casos fa rerun immediat: el missatge i el log s'han de poder
-                # llegir.
-                aturat_per_error = False
-                maquina_fallida = None
-                for maquina in ["validar.py", "sumar.py", "informe.py"]:
-                    proceso = subprocess.Popen(
-                        [sys.executable, maquina],
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, bufsize=1, cwd=RAIZ_PROYECTO,
-                    )
-                    for linea in proceso.stdout:
-                        buffer += linea
-                        placeholder.code(buffer)
-                    proceso.wait()
-                    if proceso.returncode != 0:
-                        aturat_per_error = True
-                        maquina_fallida = maquina
-                        break
-
-                st.session_state["log_recalcular"] = buffer
-
-                if aturat_per_error:
-                    st.error(
-                        f"{maquina_fallida} ha acabat amb un error (codi {proceso.returncode}) -- "
-                        f"aturant la cadena aquí. Revisa el registre de sota."
-                    )
-                elif "AVISO:" in buffer:
-                    st.warning(
-                        "Recalculat, PERÒ algun client no s'ha pogut actualitzar (Excel o informe "
-                        "obert?). Revisa el registre de sota abans de confiar en les xifres."
-                    )
-                else:
-                    st.success("Recalculat.")
-                    st.rerun()
+            executar_recalcular()
 
         if st.session_state["log_recalcular"]:
             with st.expander("Registre de l'últim Recalcular", expanded=False):
